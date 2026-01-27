@@ -1,38 +1,50 @@
 import time
+import os
 import re
 import config
 
 class BrowserCore:
     """
     Handles interactions with the browser:
-    - Login
-    - Cloudflare Solving (Using sb.solve_captcha)
+    - Login (With your Stealth setup + Credential Entry)
+    - Cloudflare Solving (sb.solve_captcha)
     - OTP Scraping
     """
 
     def __init__(self):
         self.seen_sms_ids = set()
 
+    def find_screenshot(self, filename):
+        """
+        Your clever fix: search recursively for the screenshot 
+        if Railway saves it in a subfolder.
+        """
+        if os.path.exists(filename):
+            return filename
+        
+        for root, dirs, files in os.walk("."):
+            if filename in files:
+                return os.path.join(root, filename)
+        return None
+
     def is_cloudflare(self, bot):
         """Checks if the current page is a Cloudflare challenge."""
         try:
-            # We use a safer check that won't crash if driver is busy
+            # Safer check that doesn't crash if driver is busy
             src = bot.get_page_source()
             if not src: return False
             src = src.lower()
             
-            # Common Cloudflare markers
             if "just a moment" in src: return True
             if "verify you are human" in src: return True
             if "challenge-platform" in src: return True
-            if "cf-turnstile" in src: return True
         except:
             pass
         return False
 
     def handle_cloudflare(self, bot):
         """
-        Uses the wrapper's solve_captcha method (CDP based).
+        Uses the wrapper's solve_captcha method.
         """
         if self.is_cloudflare(bot):
             print("🛡️ Cloudflare detected! Attempting sb.solve_captcha()...")
@@ -40,24 +52,23 @@ class BrowserCore:
                 if hasattr(bot, "solve_captcha"):
                     bot.solve_captcha()
                 time.sleep(config.CLOUDFLARE_WAIT)
-                
-                # Double check: did it work?
-                if self.is_cloudflare(bot):
-                    print("⚠️ Still stuck on Cloudflare after solve attempt.")
             except Exception as e:
                 print(f"⚠️ Captcha solve warning: {e}")
 
     def login(self, bot):
         """
-        Performs the login flow with robust crash handling.
+        The FULL Login Phase:
+        1. Navigate
+        2. Check Cloudflare
+        3. Type Credentials (The part your snippet was missing)
         """
         print(f"🌐 Navigating to {config.LOGIN_URL}")
         bot.safe_get(config.LOGIN_URL)
         
-        # Wait for initial load
+        # Initial wait for Railway network
         time.sleep(8)
 
-        # 1. IMMEDIATE Cloudflare Check (Before looking for email)
+        # 1. Pre-Login Cloudflare Check
         self.handle_cloudflare(bot)
 
         # Check if we are already logged in
@@ -67,17 +78,17 @@ class BrowserCore:
 
         print("⌨️ Entering credentials...")
         try:
-            # 2. Check if email field exists. If not, check Cloudflare AGAIN.
+            # 2. Aggressive Cloudflare Re-check if Email input is missing
             if not bot.is_element_visible("#card-email"):
-                print("⚠️ Email field not found immediately. Checking Cloudflare again...")
+                print("⚠️ Email field not found yet. Checking Cloudflare...")
                 self.handle_cloudflare(bot)
                 time.sleep(3)
 
-            # 3. Now wait explicitly (The step that was failing)
-            print("⏳ Waiting for login form (max 30s)...")
+            # 3. Wait for Form (Max 30s)
+            print("⏳ Waiting for login form...")
             bot.sb.wait_for_element_visible("#card-email", timeout=30)
             
-            # Form actions
+            # 4. Type Credentials
             bot.type("#card-email", config.EMAIL)
             bot.type("#card-password", config.PASSWORD)
             
@@ -94,30 +105,27 @@ class BrowserCore:
                 print("✅ Login Successful!")
                 return True
             else:
-                print("❌ Login Failed (Check credentials).")
-                bot.save_screenshot("login_failed")
+                print("❌ Login Failed.")
+                bot.save_screenshot("login_failed.png")
                 return False
 
         except Exception as e:
             print(f"❌ Login Error: {e}")
             
-            # SAFELY attempt screenshot (Prevent 'Connection refused' crash)
+            # 5. Capture Crash Screenshot
             try:
-                print("📸 Attempting crash screenshot...")
+                print("📸 Taking crash screenshot...")
                 bot.save_screenshot("login_crash")
-            except Exception as shot_err:
-                print(f"⚠️ Could not take screenshot (Browser likely dead): {shot_err}")
+            except:
+                print("⚠️ Could not take screenshot (Browser died)")
                 
             return False
 
     def get_session_data(self, bot):
-        """
-        Extracts Cookies and CSRF token for the API Client.
-        """
+        """Extracts Cookies/CSRF for the API thread."""
         cookies = {}
         csrf_token = ""
         user_agent = ""
-
         try:
             raw_cookies = bot.driver.get_cookies()
             for c in raw_cookies:
@@ -129,19 +137,13 @@ class BrowserCore:
                 let i = document.querySelector('input[name="_token"]');
                 return i ? i.value : "";
             """)
-
             user_agent = bot.execute_script("return navigator.userAgent;")
-
-        except Exception as e:
-            # Don't print spammy errors if just a momentary glitch
+        except:
             pass
-
         return cookies, csrf_token, user_agent
 
     def scrape_new_otps(self, bot):
-        """
-        Injects JS to read the table and returns NEW messages only.
-        """
+        """Scrapes the table for new OTPs."""
         try:
             sms_list = bot.execute_script("""
                 let results = [];
@@ -159,14 +161,7 @@ class BrowserCore:
                         msg = cells.find(c => c.length > 8 && !c.includes(service) && !c.includes(number)) || all_text;
 
                         let id = number + "|" + service + "|" + msg.substring(0, 15);
-                        
-                        results.push({
-                            id: id,
-                            service: service,
-                            number: number,
-                            country: country,
-                            message: msg
-                        });
+                        results.push({ id: id, service: service, number: number, country: country, message: msg });
                     }
                 });
                 return results;
@@ -181,13 +176,10 @@ class BrowserCore:
                         msg_text = sms['message']
                         otp = "???"
                         match = re.search(r'\b\d{4,8}\b', msg_text)
-                        if match:
-                            otp = match.group(0)
+                        if match: otp = match.group(0)
                         
                         sms['otp'] = otp
                         new_items.append(sms)
-                        
             return new_items
-
-        except Exception as e:
+        except:
             return []
