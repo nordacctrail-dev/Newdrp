@@ -17,7 +17,7 @@ os.environ["GOOGLE_CHROME_ARGS"] = "--disable-dev-shm-usage --no-sandbox --disab
 def update_cookies_and_tokens(bot):
     """Snapshot cookies and CSRF token to RAM."""
     try:
-        # 1. Get CSRF Token (Lighter than full cookie fetch)
+        # 1. Get CSRF Token (Safe & Fast)
         sb = bot.sb if hasattr(bot, 'sb') else bot
         try:
             csrf = sb.get_attribute('meta[name="csrf-token"]', "content")
@@ -25,7 +25,6 @@ def update_cookies_and_tokens(bot):
                 state.current_csrf_token = csrf
         except:
             pass
-            
     except Exception as e:
         log(f"Token Sync Warning: {e}", "WARN")
         if "connectable" in str(e) or "refused" in str(e) or "process is dead" in str(e):
@@ -38,7 +37,6 @@ def get_socket_io_creds(bot):
         html = sb.get_page_source()
         token_match = re.search(r"token['\"]?\s*:\s*['\"]([^'\"<>]+)['\"]", html)
         user_match = re.search(r"user['\"]?\s*:\s*['\"]([^'\"<>]+)['\"]", html)
-        
         if token_match and user_match:
             state.current_livesms_token = token_match.group(1)
             state.current_livesms_user = user_match.group(1)
@@ -47,10 +45,56 @@ def get_socket_io_creds(bot):
         pass
     return False
 
+def smart_click_captcha(sb):
+    """
+    Attempts to click the Cloudflare widget using Smart Coordinates
+    and Shadow DOM piercing (bypasses standard selectors).
+    """
+    try:
+        log("🖱️ Attempting Smart GUI Click...", "INFO")
+        
+        # METHOD 1: JS Shadow DOM Pierce (Most Reliable for invisible iframes)
+        # Finds the checkbox inside the closed shadow-root of Cloudflare
+        sb.execute_script("""
+            function clickShadow() {
+                let host = document.querySelector('div.cf-turnstile') || document.querySelector('div.cf-turnstile-wrapper');
+                if (host && host.shadowRoot) {
+                    let btn = host.shadowRoot.querySelector('input') || host.shadowRoot.querySelector('iframe');
+                    if (btn) { btn.click(); return true; }
+                }
+                return false;
+            }
+            clickShadow();
+        """)
+        
+        # METHOD 2: Center Grid Click (Simulated Human Click)
+        # We click 3 points in the vertical center where the box usually is
+        # Screen is 1920x1080. Center is (960, 540).
+        # We click offsets: Center, Center+40px, Center+80px
+        
+        # Note: We use JS to synthesize a click at these coords because
+        # actions.move_to() can be flaky in headless docker without XVFB.
+        
+        js_click_coords = """
+            function clickAt(x, y) {
+                var el = document.elementFromPoint(x, y);
+                if (el) el.click();
+            }
+            clickAt(960, 540);      // Exact Center
+            clickAt(960, 580);      // Slightly Lower
+            clickAt(960, 500);      // Slightly Higher
+        """
+        sb.execute_script(js_click_coords)
+        log("✅ Fired Smart Grid Clicks (Center Screen)", "OK")
+        return True
+
+    except Exception as e:
+        log(f"Smart Click Failed: {e}", "WARN")
+        return False
+
 def solve_captcha(bot):
     """
     Checks for and interacts with various Cloudflare/Turnstile CAPTCHAs.
-    Pass 'bot' (the wrapper) instead of 'sb' to access higher-level methods if needed.
     """
     sb = bot.sb if hasattr(bot, 'sb') else bot
     acted = False
@@ -62,54 +106,25 @@ def solve_captcha(bot):
         if "Just a moment" in title or sb.is_element_visible('iframe[src*="cloudflare"]'):
             log("🤖 Cloudflare Challenge Detected", "WARN")
             
-            # A. Try switching to iframe first (Classic Cloudflare)
+            # A. Try Standard Iframe Switch
             if sb.is_element_visible('iframe[src*="cloudflare"]'):
                 sb.switch_to_frame('iframe[src*="cloudflare"]')
-                time.sleep(1)
-                
+                time.sleep(0.5)
                 if sb.is_element_visible("#challenge-stage"):
                     sb.click("#challenge-stage")
-                    log("✅ Clicked Cloudflare Challenge Stage", "OK")
                     acted = True
                 elif sb.is_element_visible('input[type="checkbox"]'):
                     sb.click('input[type="checkbox"]')
-                    log("✅ Clicked Cloudflare Checkbox", "OK")
                     acted = True
-                elif sb.is_element_visible('.ctp-checkbox-label'):
-                    sb.click('.ctp-checkbox-label')
-                    log("✅ Clicked Cloudflare Label", "OK")
-                    acted = True
-                else:
-                    # Fallback inside iframe
-                    log("⚠️ Iframe found but empty. Clicking center.", "WARN")
-                    sb.click("body") 
-                    acted = True
-                    
                 sb.switch_to_default_content()
-                return acted
+                
+                if acted: 
+                    log("✅ Clicked inside Iframe", "OK")
+                    return True
             
-            # B. Turnstile Widget (New Cloudflare) - Often not in iframe
-            elif sb.is_element_visible("div.cf-turnstile"):
-                log("✅ Clicked Turnstile Widget", "OK")
-                sb.click("div.cf-turnstile")
-                return True
-
-            # C. BLIND CLICK FALLBACK (The Fix)
-            # If we see "Just a moment" but no elements, click the center of the screen.
-            # This hits the Shadow DOM checkbox often.
-            else:
-                 log("⚠️ No specific element found. Attempting Blind Click...", "WARN")
-                 
-                 # Click Center (Offset slightly to hit checkbox area)
-                 # Note: SeleniumBase click_with_offset might be needed, 
-                 # but simple JS click on coordinates works too.
-                 sb.execute_script("document.elementFromPoint(window.innerWidth/2, window.innerHeight/2).click();")
-                 time.sleep(1)
-                 # Try slightly lower (common for widget position)
-                 sb.execute_script("document.elementFromPoint(window.innerWidth/2, window.innerHeight/2 + 50).click();")
-                 
-                 log("✅ Blind Click Sent.", "OK")
-                 return True
+            # B. If Iframe failed or not found, use SMART CLICK
+            log("⚠️ Standard selector failed. Engaging Smart Click...", "WARN")
+            return smart_click_captcha(sb)
 
         # --- SCENARIO 2: Generic Checkbox ---
         if sb.is_element_visible('input[type="checkbox"]'):
@@ -123,7 +138,7 @@ def solve_captcha(bot):
     return False
 
 def login_sequence(bot):
-    """Performs the full login sequence with robust retry loops."""
+    """Performs the full login sequence."""
     sb = bot.sb if hasattr(bot, 'sb') else bot
     
     log(f"🌐 Navigating to {config.LOGIN_URL}...", "INFO")
@@ -133,13 +148,11 @@ def login_sequence(bot):
         log(f"Navigation failed: {e}", "ERROR")
         return False
         
-    # --- CAPTCHA & FORM DETECTION LOOP ---
     log("⏳ Waiting for Login Form or Captcha...", "INFO")
     
     max_retries = 25 
-    
     for i in range(max_retries):
-        # A. Check if Form is Ready
+        # A. Check for Form
         if sb.is_element_visible("#card-email"):
             log("✅ Login Form Detected!", "OK")
             break
@@ -147,12 +160,12 @@ def login_sequence(bot):
         # B. Check for Captcha / "Just a moment"
         if solve_captcha(bot):
             log("⏳ Captcha interaction... waiting for reload.", "INFO")
-            time.sleep(6) 
+            time.sleep(8) 
             continue
             
-        # C. Check if we are already logged in
+        # C. Check if already logged in
         if "portal" in sb.get_current_url() or "live" in sb.get_current_url():
-            log("✅ Already logged in (Session active)", "OK")
+            log("✅ Already logged in", "OK")
             break
 
         time.sleep(3)
@@ -172,12 +185,10 @@ def login_sequence(bot):
     # --- CLICKING ---
     log("⌨️ Clicking Login...", "INFO")
     try:
-        submit_selector = 'button[type="submit"]'
-        sb.scroll_to(submit_selector)
-        time.sleep(0.5)
-        sb.click(submit_selector)
-    except:
+        # Try JS click for reliability
         sb.execute_script("document.querySelector('button[type=\"submit\"]').click()")
+    except:
+        pass
 
     log("⏳ Waiting for redirect...", "INFO")
     time.sleep(15)
