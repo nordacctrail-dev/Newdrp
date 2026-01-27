@@ -4,91 +4,43 @@ import re
 import config
 
 class BrowserCore:
-    """
-    Handles interactions with the browser:
-    - Login (With your Stealth setup + Credential Entry)
-    - Cloudflare Solving (sb.solve_captcha)
-    - OTP Scraping
-    """
-
     def __init__(self):
         self.seen_sms_ids = set()
 
     def find_screenshot(self, filename):
         """
-        Your clever fix: search recursively for the screenshot 
-        if Railway saves it in a subfolder.
+        Your logic: Hunts for the screenshot in all subfolders.
         """
-        if os.path.exists(filename):
-            return filename
+        search_name = f"{filename}.png"
+        if os.path.exists(search_name):
+            return search_name
         
         for root, dirs, files in os.walk("."):
-            if filename in files:
-                return os.path.join(root, filename)
+            if search_name in files:
+                return os.path.join(root, search_name)
         return None
-
-    def is_cloudflare(self, bot):
-        """Checks if the current page is a Cloudflare challenge."""
-        try:
-            # Safer check that doesn't crash if driver is busy
-            src = bot.get_page_source()
-            if not src: return False
-            src = src.lower()
-            
-            if "just a moment" in src: return True
-            if "verify you are human" in src: return True
-            if "challenge-platform" in src: return True
-        except:
-            pass
-        return False
-
-    def handle_cloudflare(self, bot):
-        """
-        Uses the wrapper's solve_captcha method.
-        """
-        if self.is_cloudflare(bot):
-            print("🛡️ Cloudflare detected! Attempting sb.solve_captcha()...")
-            try:
-                if hasattr(bot, "solve_captcha"):
-                    bot.solve_captcha()
-                time.sleep(config.CLOUDFLARE_WAIT)
-            except Exception as e:
-                print(f"⚠️ Captcha solve warning: {e}")
 
     def login(self, bot):
         """
-        The FULL Login Phase:
-        1. Navigate
-        2. Check Cloudflare
-        3. Type Credentials (The part your snippet was missing)
+        Relaxed Login Logic (Trusting StealthBot).
         """
         print(f"🌐 Navigating to {config.LOGIN_URL}")
         bot.safe_get(config.LOGIN_URL)
         
-        # Initial wait for Railway network
-        time.sleep(8)
+        # 1. THE SIMPLE WAIT (Just like your working script)
+        # Trust uc=True to handle the "Just a moment" screen here.
+        time.sleep(10)
 
-        # 1. Pre-Login Cloudflare Check
-        self.handle_cloudflare(bot)
-
-        # Check if we are already logged in
+        # 2. Check if we are already logged in
         if "live/my_sms" in bot.get_current_url() or "portal" in bot.get_current_url():
             print("✅ Session already active.")
             return True
 
         print("⌨️ Entering credentials...")
         try:
-            # 2. Aggressive Cloudflare Re-check if Email input is missing
-            if not bot.is_element_visible("#card-email"):
-                print("⚠️ Email field not found yet. Checking Cloudflare...")
-                self.handle_cloudflare(bot)
-                time.sleep(3)
-
-            # 3. Wait for Form (Max 30s)
-            print("⏳ Waiting for login form...")
-            bot.sb.wait_for_element_visible("#card-email", timeout=30)
-            
-            # 4. Type Credentials
+            # 3. Type Credentials directly. 
+            # If Cloudflare is still there, this will fail naturally, 
+            # and we will catch it in the screenshot.
             bot.type("#card-email", config.EMAIL)
             bot.type("#card-password", config.PASSWORD)
             
@@ -99,30 +51,27 @@ class BrowserCore:
             
             print("🚀 Login clicked. Waiting for redirect...")
             time.sleep(10)
-            self.handle_cloudflare(bot)
 
             if "live/my_sms" in bot.get_current_url() or "portal" in bot.get_current_url():
                 print("✅ Login Successful!")
                 return True
             else:
                 print("❌ Login Failed.")
-                bot.save_screenshot("login_failed.png")
+                bot.save_screenshot("login_failed")
                 return False
 
         except Exception as e:
             print(f"❌ Login Error: {e}")
             
-            # 5. Capture Crash Screenshot
+            # 4. CAPTURE & HUNT FOR SCREENSHOT
             try:
                 print("📸 Taking crash screenshot...")
                 bot.save_screenshot("login_crash")
             except:
-                print("⚠️ Could not take screenshot (Browser died)")
-                
+                pass
             return False
 
     def get_session_data(self, bot):
-        """Extracts Cookies/CSRF for the API thread."""
         cookies = {}
         csrf_token = ""
         user_agent = ""
@@ -143,7 +92,6 @@ class BrowserCore:
         return cookies, csrf_token, user_agent
 
     def scrape_new_otps(self, bot):
-        """Scrapes the table for new OTPs."""
         try:
             sms_list = bot.execute_script("""
                 let results = [];
@@ -155,11 +103,9 @@ class BrowserCore:
                         let number = row.querySelector('.CopyText')?.innerText.trim() || "Unknown";
                         let country = row.querySelector('.stretched-link')?.innerText.trim() || "Unknown";
                         let all_text = row.innerText;
-                        
                         let msg = "Hidden";
                         let cells = Array.from(cols).map(c => c.innerText.trim());
                         msg = cells.find(c => c.length > 8 && !c.includes(service) && !c.includes(number)) || all_text;
-
                         let id = number + "|" + service + "|" + msg.substring(0, 15);
                         results.push({ id: id, service: service, number: number, country: country, message: msg });
                     }
@@ -172,13 +118,8 @@ class BrowserCore:
                 for sms in reversed(sms_list):
                     if sms['id'] not in self.seen_sms_ids:
                         self.seen_sms_ids.add(sms['id'])
-                        
-                        msg_text = sms['message']
-                        otp = "???"
-                        match = re.search(r'\b\d{4,8}\b', msg_text)
-                        if match: otp = match.group(0)
-                        
-                        sms['otp'] = otp
+                        match = re.search(r'\b\d{4,8}\b', sms['message'])
+                        sms['otp'] = match.group(0) if match else "???"
                         new_items.append(sms)
             return new_items
         except:
