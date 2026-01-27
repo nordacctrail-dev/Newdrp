@@ -10,52 +10,36 @@ from sb_stealth_wrapper import StealthBot
 from sb_stealth_wrapper.strategies.input import HumanInputStrategy
 
 def update_cookies_and_tokens(bot):
-    """
-    Safely snapshots cookies and CSRF token to RAM with Retries.
-    """
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            # 1. Get Driver (Robust Access)
-            driver = getattr(bot, "driver", None)
-            if not driver and hasattr(bot, "sb"):
-                driver = bot.sb.driver
+    """Snapshot cookies and CSRF token to RAM."""
+    try:
+        # 1. Get Cookies
+        driver = getattr(bot, "driver", None)
+        if not driver and hasattr(bot, "sb"):
+            driver = bot.sb.driver
             
-            if not driver:
-                log("⚠️ Driver not found in bot instance.", "WARN")
-                return
-
-            # 2. Fetch Cookies
+        if driver:
             cookies = driver.get_cookies()
             simple_cookies = {}
             for c in cookies:
-                # Filter for IVASMS cookies
                 if "ivasms" in c.get("domain", "") or "ivasms" in c.get("name", ""):
                     simple_cookies[c['name']] = c['value']
             
             if simple_cookies:
                 state.current_cookies = simple_cookies
-                # 3. Fetch CSRF Token
-                sb = bot.sb if hasattr(bot, 'sb') else bot
-                try:
-                    csrf = sb.get_attribute('meta[name="csrf-token"]', "content")
-                    if csrf:
-                        state.current_csrf_token = csrf
-                except:
-                    pass
-                
-                # Success - Exit Retry Loop
-                return 
 
-            else:
-                log(f"⚠️ No IVASMS cookies found (Attempt {attempt+1}/{max_retries})", "WARN")
-                time.sleep(2) 
-
-        except Exception as e:
-            log(f"Cookie Sync Error (Attempt {attempt+1}): {e}", "WARN")
-            if "Connection refused" in str(e) or "Max retries exceeded" in str(e):
-                raise e
-            time.sleep(2)
+        # 2. Get CSRF Token
+        sb = bot.sb if hasattr(bot, 'sb') else bot
+        try:
+            csrf = sb.get_attribute('meta[name="csrf-token"]', "content")
+            if csrf:
+                state.current_csrf_token = csrf
+        except:
+            pass
+            
+    except Exception as e:
+        log(f"Cookie Sync Warning: {e}", "WARN")
+        if "Connection refused" in str(e) or "Max retries exceeded" in str(e):
+            raise e
 
 def get_socket_io_creds(bot):
     """Extracts JS variables for WebSocket auth."""
@@ -68,7 +52,6 @@ def get_socket_io_creds(bot):
         if token_match and user_match:
             state.current_livesms_token = token_match.group(1)
             state.current_livesms_user = user_match.group(1)
-            log("✅ Socket Credentials Extracted", "OK")
             return True
     except:
         pass
@@ -90,6 +73,7 @@ def login_sequence(bot):
     # --- CAPTCHA CHECK ---
     log("🛡️ Checking for CAPTCHA...", "INFO")
     try:
+        # Check title to see where we are
         log(f"Current Page Title: {sb.get_title()}", "INFO")
         
         if sb.is_element_visible('iframe[src*="cloudflare"]'):
@@ -112,6 +96,9 @@ def login_sequence(bot):
         sb.wait_for_element("#card-email", timeout=40)
     except:
         log("❌ Login form not found.", "ERROR")
+        # Log source snippet to debug what page we are actually on
+        src = sb.get_page_source()[:500]
+        log(f"Page Source Snippet: {src}", "WARN")
         return False
 
     # --- TYPING ---
@@ -152,42 +139,31 @@ def browser_thread_target():
     """
     my_input = HumanInputStrategy()
 
-    # --- CRITICAL FLAGS FOR DOCKER ---
-    extra_args = [
-        "--disable-dev-shm-usage",  # Writes to /tmp (Prevents Crash)
-        "--no-sandbox",             # Required for Docker
-        "--disable-gpu"
-    ]
-
     while not state.shutdown_event.is_set():
         try:
             log("🚀 Launching Browser Session...", "INFO")
             
-            # Removed uc_cdp_events and user_data_dir to avoid unexpected argument errors
-            with StealthBot(
-                headless=True, 
-                input_strategy=my_input,
-                chromium_arg=",".join(extra_args) 
-            ) as bot:
-                
+            with StealthBot(headless=True, input_strategy=my_input) as bot:
                 state.driver_ref = bot
                 sb = bot.sb if hasattr(bot, 'sb') else bot
 
-                # 1. Login
+                try: sb.set_window_size(1920, 1080)
+                except: pass
+                
+                # 1. Try to Login
                 if not login_sequence(bot):
                     send_sync_message("❌ <b>Bot Login Failed - Retrying...</b>")
-                    log("🔄 Login failed. Restarting browser in 5s...", "WARN")
+                    log("🔄 Login failed. Restarting browser session in 5s...", "WARN")
                     time.sleep(5)
-                    continue 
+                    continue # <--- THIS RESTARTS THE BROWSER IMMEDIATELY
 
-                # 2. Monitor Loop
+                # 2. If Login Succeeded, START Monitor
                 send_sync_message("✅ <b>Bot Logged In</b>")
                 log("🕵️ Browser entering monitoring loop...", "INFO")
                 
                 while not state.shutdown_event.is_set():
                     time.sleep(10)
                     
-                    # Safe Cookie Refresh
                     update_cookies_and_tokens(bot)
 
                     if not state.current_livesms_token:
@@ -199,7 +175,7 @@ def browser_thread_target():
                     if "login" in sb.get_current_url():
                         log("⚠️ Session Lost - Re-logging...", "WARN")
                         if not login_sequence(bot):
-                            break 
+                            break # Break inner loop to restart browser
 
         except Exception as e:
             log(f"💥 Browser Crashed: {e}", "ERROR")
