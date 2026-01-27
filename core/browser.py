@@ -38,6 +38,7 @@ def update_cookies_and_tokens(bot):
             
     except Exception as e:
         log(f"Cookie Sync Warning: {e}", "WARN")
+        # Raises error if driver died, triggering restart
         if "Connection refused" in str(e) or "Max retries exceeded" in str(e):
             raise e
 
@@ -73,7 +74,6 @@ def login_sequence(bot):
     # --- CAPTCHA CHECK ---
     log("🛡️ Checking for CAPTCHA...", "INFO")
     try:
-        # Check title to see where we are
         log(f"Current Page Title: {sb.get_title()}", "INFO")
         
         if sb.is_element_visible('iframe[src*="cloudflare"]'):
@@ -96,9 +96,6 @@ def login_sequence(bot):
         sb.wait_for_element("#card-email", timeout=40)
     except:
         log("❌ Login form not found.", "ERROR")
-        # Log source snippet to debug what page we are actually on
-        src = sb.get_page_source()[:500]
-        log(f"Page Source Snippet: {src}", "WARN")
         return False
 
     # --- TYPING ---
@@ -139,23 +136,38 @@ def browser_thread_target():
     """
     my_input = HumanInputStrategy()
 
+    # --- CRITICAL FIX: Add Memory Flags for Docker ---
+    # These flags prevent the "Connection refused" crash
+    extra_args = [
+        "--disable-dev-shm-usage",  # Writes to /tmp instead of /dev/shm
+        "--no-sandbox",             # Required for root/docker
+        "--disable-gpu",
+        "--remote-debugging-port=9222"
+    ]
+
     while not state.shutdown_event.is_set():
         try:
             log("🚀 Launching Browser Session...", "INFO")
             
-            with StealthBot(headless=True, input_strategy=my_input) as bot:
+            # Pass args to StealthBot (SeleniumBase wrapper usually passes **kwargs to Driver)
+            # If your wrapper doesn't accept 'extension_dir' or similar, we rely on standard SB args
+            with StealthBot(
+                headless=True, 
+                input_strategy=my_input,
+                uc_cdp_events=True,  # Better anti-detect
+                user_data_dir=None,  # Use fresh profile
+                chromium_arg=",".join(extra_args) # Pass flags to Chrome
+            ) as bot:
+                
                 state.driver_ref = bot
                 sb = bot.sb if hasattr(bot, 'sb') else bot
 
-                try: sb.set_window_size(1920, 1080)
-                except: pass
-                
                 # 1. Try to Login
                 if not login_sequence(bot):
                     send_sync_message("❌ <b>Bot Login Failed - Retrying...</b>")
                     log("🔄 Login failed. Restarting browser session in 5s...", "WARN")
                     time.sleep(5)
-                    continue # <--- THIS RESTARTS THE BROWSER IMMEDIATELY
+                    continue 
 
                 # 2. If Login Succeeded, START Monitor
                 send_sync_message("✅ <b>Bot Logged In</b>")
@@ -175,7 +187,7 @@ def browser_thread_target():
                     if "login" in sb.get_current_url():
                         log("⚠️ Session Lost - Re-logging...", "WARN")
                         if not login_sequence(bot):
-                            break # Break inner loop to restart browser
+                            break 
 
         except Exception as e:
             log(f"💥 Browser Crashed: {e}", "ERROR")
