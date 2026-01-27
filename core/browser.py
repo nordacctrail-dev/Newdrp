@@ -10,37 +10,53 @@ from sb_stealth_wrapper import StealthBot
 from sb_stealth_wrapper.strategies.input import HumanInputStrategy
 
 def update_cookies_and_tokens(bot):
-    """Snapshot cookies and CSRF token to RAM."""
-    try:
-        # 1. Get Cookies
-        driver = getattr(bot, "driver", None)
-        if not driver and hasattr(bot, "sb"):
-            driver = bot.sb.driver
+    """
+    Safely snapshots cookies and CSRF token to RAM with Retries.
+    """
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            # 1. Get Driver (Robust Access)
+            driver = getattr(bot, "driver", None)
+            if not driver and hasattr(bot, "sb"):
+                driver = bot.sb.driver
             
-        if driver:
+            if not driver:
+                log("⚠️ Driver not found in bot instance.", "WARN")
+                return
+
+            # 2. Fetch Cookies
             cookies = driver.get_cookies()
             simple_cookies = {}
             for c in cookies:
+                # Filter for IVASMS cookies
                 if "ivasms" in c.get("domain", "") or "ivasms" in c.get("name", ""):
                     simple_cookies[c['name']] = c['value']
             
             if simple_cookies:
                 state.current_cookies = simple_cookies
+                # 3. Fetch CSRF Token
+                sb = bot.sb if hasattr(bot, 'sb') else bot
+                try:
+                    csrf = sb.get_attribute('meta[name="csrf-token"]', "content")
+                    if csrf:
+                        state.current_csrf_token = csrf
+                except:
+                    pass
+                
+                # Success - Exit Retry Loop
+                return 
 
-        # 2. Get CSRF Token
-        sb = bot.sb if hasattr(bot, 'sb') else bot
-        try:
-            csrf = sb.get_attribute('meta[name="csrf-token"]', "content")
-            if csrf:
-                state.current_csrf_token = csrf
-        except:
-            pass
-            
-    except Exception as e:
-        log(f"Cookie Sync Warning: {e}", "WARN")
-        # Raises error if driver died, triggering restart
-        if "Connection refused" in str(e) or "Max retries exceeded" in str(e):
-            raise e
+            else:
+                log(f"⚠️ No IVASMS cookies found (Attempt {attempt+1}/{max_retries})", "WARN")
+                time.sleep(2) # Wait for browser to write cookies
+
+        except Exception as e:
+            log(f"Cookie Sync Error (Attempt {attempt+1}): {e}", "WARN")
+            # If driver died, re-raise to trigger restart
+            if "Connection refused" in str(e) or "Max retries exceeded" in str(e):
+                raise e
+            time.sleep(2)
 
 def get_socket_io_creds(bot):
     """Extracts JS variables for WebSocket auth."""
@@ -53,6 +69,7 @@ def get_socket_io_creds(bot):
         if token_match and user_match:
             state.current_livesms_token = token_match.group(1)
             state.current_livesms_user = user_match.group(1)
+            log("✅ Socket Credentials Extracted", "OK")
             return True
     except:
         pass
@@ -136,11 +153,10 @@ def browser_thread_target():
     """
     my_input = HumanInputStrategy()
 
-    # --- CRITICAL FIX: Add Memory Flags for Docker ---
-    # These flags prevent the "Connection refused" crash
+    # --- CRITICAL FLAGS FOR DOCKER ---
     extra_args = [
-        "--disable-dev-shm-usage",  # Writes to /tmp instead of /dev/shm
-        "--no-sandbox",             # Required for root/docker
+        "--disable-dev-shm-usage",  # Writes to /tmp (Prevents Crash)
+        "--no-sandbox",             # Required for Docker
         "--disable-gpu",
         "--remote-debugging-port=9222"
     ]
@@ -149,33 +165,32 @@ def browser_thread_target():
         try:
             log("🚀 Launching Browser Session...", "INFO")
             
-            # Pass args to StealthBot (SeleniumBase wrapper usually passes **kwargs to Driver)
-            # If your wrapper doesn't accept 'extension_dir' or similar, we rely on standard SB args
             with StealthBot(
                 headless=True, 
                 input_strategy=my_input,
-                uc_cdp_events=True,  # Better anti-detect
-                user_data_dir=None,  # Use fresh profile
-                chromium_arg=",".join(extra_args) # Pass flags to Chrome
+                uc_cdp_events=True,
+                user_data_dir=None,
+                chromium_arg=",".join(extra_args) # Apply Memory Flags
             ) as bot:
                 
                 state.driver_ref = bot
                 sb = bot.sb if hasattr(bot, 'sb') else bot
 
-                # 1. Try to Login
+                # 1. Login
                 if not login_sequence(bot):
                     send_sync_message("❌ <b>Bot Login Failed - Retrying...</b>")
-                    log("🔄 Login failed. Restarting browser session in 5s...", "WARN")
+                    log("🔄 Login failed. Restarting browser in 5s...", "WARN")
                     time.sleep(5)
                     continue 
 
-                # 2. If Login Succeeded, START Monitor
+                # 2. Monitor Loop
                 send_sync_message("✅ <b>Bot Logged In</b>")
                 log("🕵️ Browser entering monitoring loop...", "INFO")
                 
                 while not state.shutdown_event.is_set():
                     time.sleep(10)
                     
+                    # Safe Cookie Refresh
                     update_cookies_and_tokens(bot)
 
                     if not state.current_livesms_token:
