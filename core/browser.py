@@ -17,10 +17,7 @@ os.environ["GOOGLE_CHROME_ARGS"] = "--disable-dev-shm-usage --no-sandbox --disab
 def update_cookies_and_tokens(bot):
     """Snapshot cookies and CSRF token to RAM."""
     try:
-        # --- COOKIE FETCHING DISABLED (Prevention for Crash) ---
-        # -------------------------------------------------------
-
-        # 2. Get CSRF Token (Lighter than full cookie fetch)
+        # 1. Get CSRF Token (Lighter than full cookie fetch)
         sb = bot.sb if hasattr(bot, 'sb') else bot
         try:
             csrf = sb.get_attribute('meta[name="csrf-token"]', "content")
@@ -50,24 +47,26 @@ def get_socket_io_creds(bot):
         pass
     return False
 
-def solve_captcha(sb):
+def solve_captcha(bot):
     """
     Checks for and interacts with various Cloudflare/Turnstile CAPTCHAs.
+    Pass 'bot' (the wrapper) instead of 'sb' to access higher-level methods if needed.
     """
+    sb = bot.sb if hasattr(bot, 'sb') else bot
     acted = False
+    
     try:
         title = sb.get_title()
         
         # --- SCENARIO 1: Cloudflare "Just a moment..." ---
         if "Just a moment" in title or sb.is_element_visible('iframe[src*="cloudflare"]'):
-            log("🤖 Detected Cloudflare Challenge...", "WARN")
+            log("🤖 Cloudflare Challenge Detected", "WARN")
             
-            # Try switching to iframe first
+            # A. Try switching to iframe first (Classic Cloudflare)
             if sb.is_element_visible('iframe[src*="cloudflare"]'):
                 sb.switch_to_frame('iframe[src*="cloudflare"]')
                 time.sleep(1)
                 
-                # Try clicking the shadow element
                 if sb.is_element_visible("#challenge-stage"):
                     sb.click("#challenge-stage")
                     log("✅ Clicked Cloudflare Challenge Stage", "OK")
@@ -81,29 +80,41 @@ def solve_captcha(sb):
                     log("✅ Clicked Cloudflare Label", "OK")
                     acted = True
                 else:
-                    # Fallback: Click center of iframe if nothing visible found
-                    log("⚠️ Element not found in frame, clicking center fallback...", "WARN")
+                    # Fallback inside iframe
+                    log("⚠️ Iframe found but empty. Clicking center.", "WARN")
                     sb.click("body") 
                     acted = True
                     
                 sb.switch_to_default_content()
+                return acted
             
-            # If no iframe found but title is "Just a moment"
-            else:
-                 log("⚠️ No iframe found but stuck on 'Just a moment'.", "WARN")
+            # B. Turnstile Widget (New Cloudflare) - Often not in iframe
+            elif sb.is_element_visible("div.cf-turnstile"):
+                log("✅ Clicked Turnstile Widget", "OK")
+                sb.click("div.cf-turnstile")
+                return True
 
-            return acted
+            # C. BLIND CLICK FALLBACK (The Fix)
+            # If we see "Just a moment" but no elements, click the center of the screen.
+            # This hits the Shadow DOM checkbox often.
+            else:
+                 log("⚠️ No specific element found. Attempting Blind Click...", "WARN")
+                 
+                 # Click Center (Offset slightly to hit checkbox area)
+                 # Note: SeleniumBase click_with_offset might be needed, 
+                 # but simple JS click on coordinates works too.
+                 sb.execute_script("document.elementFromPoint(window.innerWidth/2, window.innerHeight/2).click();")
+                 time.sleep(1)
+                 # Try slightly lower (common for widget position)
+                 sb.execute_script("document.elementFromPoint(window.innerWidth/2, window.innerHeight/2 + 50).click();")
+                 
+                 log("✅ Blind Click Sent.", "OK")
+                 return True
 
         # --- SCENARIO 2: Generic Checkbox ---
         if sb.is_element_visible('input[type="checkbox"]'):
             sb.click('input[type="checkbox"]')
             log("✅ Clicked Generic Checkbox", "OK")
-            return True
-
-        # --- SCENARIO 3: Turnstile ---
-        if sb.is_element_visible('div.cf-turnstile-wrapper'):
-            log("🤖 Detected Turnstile Wrapper", "WARN")
-            sb.click('div.cf-turnstile-wrapper')
             return True
 
     except Exception as e:
@@ -125,8 +136,7 @@ def login_sequence(bot):
     # --- CAPTCHA & FORM DETECTION LOOP ---
     log("⏳ Waiting for Login Form or Captcha...", "INFO")
     
-    # Increased wait time for Cloudflare
-    max_retries = 20 
+    max_retries = 25 
     
     for i in range(max_retries):
         # A. Check if Form is Ready
@@ -135,9 +145,9 @@ def login_sequence(bot):
             break
         
         # B. Check for Captcha / "Just a moment"
-        if solve_captcha(sb):
+        if solve_captcha(bot):
             log("⏳ Captcha interaction... waiting for reload.", "INFO")
-            time.sleep(8) # Increased wait after click
+            time.sleep(6) 
             continue
             
         # C. Check if we are already logged in
@@ -149,11 +159,6 @@ def login_sequence(bot):
         if i == max_retries - 1:
             log("❌ Login form never appeared.", "ERROR")
             log(f"Stuck on Page: {sb.get_title()}", "WARN")
-            
-            # DEBUG: Dump source if stuck
-            src_snippet = sb.get_page_source()[:500]
-            log(f"Source Snippet: {src_snippet}", "WARN")
-            
             return False
 
     # --- TYPING ---
