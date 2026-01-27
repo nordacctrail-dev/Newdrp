@@ -18,19 +18,6 @@ def update_cookies_and_tokens(bot):
     """Snapshot cookies and CSRF token to RAM."""
     try:
         # --- COOKIE FETCHING DISABLED (Prevention for Crash) ---
-        # driver = getattr(bot, "driver", None)
-        # if not driver and hasattr(bot, "sb"):
-        #     driver = bot.sb.driver
-        #     
-        # if driver:
-        #     cookies = driver.get_cookies()
-        #     simple_cookies = {}
-        #     for c in cookies:
-        #         if "ivasms" in c.get("domain", "") or "ivasms" in c.get("name", ""):
-        #             simple_cookies[c['name']] = c['value']
-        #     
-        #     if simple_cookies:
-        #         state.current_cookies = simple_cookies
         # -------------------------------------------------------
 
         # 2. Get CSRF Token (Lighter than full cookie fetch)
@@ -66,40 +53,54 @@ def get_socket_io_creds(bot):
 def solve_captcha(sb):
     """
     Checks for and interacts with various Cloudflare/Turnstile CAPTCHAs.
-    Returns True if an interaction occurred.
     """
     acted = False
     try:
-        # 1. Standard Cloudflare Iframe
-        if sb.is_element_visible('iframe[src*="cloudflare"]'):
-            log("🤖 Detected Cloudflare Iframe", "WARN")
-            sb.switch_to_frame('iframe[src*="cloudflare"]')
-            time.sleep(1)
+        title = sb.get_title()
+        
+        # --- SCENARIO 1: Cloudflare "Just a moment..." ---
+        if "Just a moment" in title or sb.is_element_visible('iframe[src*="cloudflare"]'):
+            log("🤖 Detected Cloudflare Challenge...", "WARN")
             
-            if sb.is_element_visible("#challenge-stage"):
-                sb.click("#challenge-stage")
-                log("✅ Clicked Cloudflare Challenge Stage", "OK")
-                acted = True
-            elif sb.is_element_visible('input[type="checkbox"]'):
-                sb.click('input[type="checkbox"]')
-                log("✅ Clicked Cloudflare Checkbox", "OK")
-                acted = True
-            elif sb.is_element_visible('.ctp-checkbox-label'):
-                sb.click('.ctp-checkbox-label')
-                log("✅ Clicked Cloudflare Label", "OK")
-                acted = True
+            # Try switching to iframe first
+            if sb.is_element_visible('iframe[src*="cloudflare"]'):
+                sb.switch_to_frame('iframe[src*="cloudflare"]')
+                time.sleep(1)
                 
-            sb.switch_to_default_content()
+                # Try clicking the shadow element
+                if sb.is_element_visible("#challenge-stage"):
+                    sb.click("#challenge-stage")
+                    log("✅ Clicked Cloudflare Challenge Stage", "OK")
+                    acted = True
+                elif sb.is_element_visible('input[type="checkbox"]'):
+                    sb.click('input[type="checkbox"]')
+                    log("✅ Clicked Cloudflare Checkbox", "OK")
+                    acted = True
+                elif sb.is_element_visible('.ctp-checkbox-label'):
+                    sb.click('.ctp-checkbox-label')
+                    log("✅ Clicked Cloudflare Label", "OK")
+                    acted = True
+                else:
+                    # Fallback: Click center of iframe if nothing visible found
+                    log("⚠️ Element not found in frame, clicking center fallback...", "WARN")
+                    sb.click("body") 
+                    acted = True
+                    
+                sb.switch_to_default_content()
+            
+            # If no iframe found but title is "Just a moment"
+            else:
+                 log("⚠️ No iframe found but stuck on 'Just a moment'.", "WARN")
+
             return acted
 
-        # 2. Generic 'Verify you are human' Checkbox (Non-iframe)
+        # --- SCENARIO 2: Generic Checkbox ---
         if sb.is_element_visible('input[type="checkbox"]'):
             sb.click('input[type="checkbox"]')
             log("✅ Clicked Generic Checkbox", "OK")
             return True
 
-        # 3. Cloudflare Turnstile (Shadow DOM wrapper)
-        # Sometimes it appears as a widget div
+        # --- SCENARIO 3: Turnstile ---
         if sb.is_element_visible('div.cf-turnstile-wrapper'):
             log("🤖 Detected Turnstile Wrapper", "WARN")
             sb.click('div.cf-turnstile-wrapper')
@@ -116,39 +117,43 @@ def login_sequence(bot):
     
     log(f"🌐 Navigating to {config.LOGIN_URL}...", "INFO")
     try:
-        # Use open instead of safe_get to avoid timeout errors if page loads slowly
         sb.open(config.LOGIN_URL) 
     except Exception as e:
         log(f"Navigation failed: {e}", "ERROR")
         return False
         
     # --- CAPTCHA & FORM DETECTION LOOP ---
-    # We loop for up to 60 seconds looking for the form OR a captcha
     log("⏳ Waiting for Login Form or Captcha...", "INFO")
     
-    max_retries = 15
+    # Increased wait time for Cloudflare
+    max_retries = 20 
+    
     for i in range(max_retries):
         # A. Check if Form is Ready
         if sb.is_element_visible("#card-email"):
             log("✅ Login Form Detected!", "OK")
             break
         
-        # B. Check for Captcha
+        # B. Check for Captcha / "Just a moment"
         if solve_captcha(sb):
-            log("⏳ Captcha clicked... waiting for reload.", "INFO")
-            time.sleep(5) # Give it time to reload the page
+            log("⏳ Captcha interaction... waiting for reload.", "INFO")
+            time.sleep(8) # Increased wait after click
             continue
             
-        # C. Check if we are already logged in (Redirected fast)
+        # C. Check if we are already logged in
         if "portal" in sb.get_current_url() or "live" in sb.get_current_url():
             log("✅ Already logged in (Session active)", "OK")
             break
 
-        time.sleep(4)
+        time.sleep(3)
         if i == max_retries - 1:
             log("❌ Login form never appeared.", "ERROR")
-            # Log title to see where we are stuck
             log(f"Stuck on Page: {sb.get_title()}", "WARN")
+            
+            # DEBUG: Dump source if stuck
+            src_snippet = sb.get_page_source()[:500]
+            log(f"Source Snippet: {src_snippet}", "WARN")
+            
             return False
 
     # --- TYPING ---
@@ -176,10 +181,7 @@ def login_sequence(bot):
     current_url = sb.get_current_url()
     if "login" not in current_url and ("portal" in current_url or "live" in current_url):
         log("✅ Login Successful!", "OK")
-        
-        # Wait for render (Safety for memory crash)
         time.sleep(15) 
-        
         update_cookies_and_tokens(bot)
         get_socket_io_creds(bot)
         return True
@@ -188,9 +190,7 @@ def login_sequence(bot):
         return False
 
 def browser_thread_target():
-    """
-    Main Thread: Auto-restarts browser if it crashes.
-    """
+    """Main Thread: Auto-restarts browser if it crashes."""
     my_input = HumanInputStrategy()
 
     while not state.shutdown_event.is_set():
@@ -204,20 +204,17 @@ def browser_thread_target():
                 try: sb.set_window_size(1920, 1080)
                 except: pass
                 
-                # 1. Try to Login
                 if not login_sequence(bot):
                     send_sync_message("❌ <b>Bot Login Failed - Retrying...</b>")
                     log("🔄 Login failed. Restarting browser session in 5s...", "WARN")
                     time.sleep(5)
                     continue 
 
-                # 2. If Login Succeeded, START Monitor
                 send_sync_message("✅ <b>Bot Logged In</b>")
                 log("🕵️ Browser entering monitoring loop...", "INFO")
                 
                 while not state.shutdown_event.is_set():
                     time.sleep(10)
-                    
                     update_cookies_and_tokens(bot)
 
                     if not state.current_livesms_token:
