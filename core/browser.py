@@ -10,14 +10,13 @@ from core.notifier import send_sync_message
 from sb_stealth_wrapper import StealthBot
 from sb_stealth_wrapper.strategies.input import HumanInputStrategy
 
-# Force Docker flags via env vars
+# Keeps memory safety flags for Docker, even in headed mode
 os.environ["CHROME_ARGS"] = "--disable-dev-shm-usage --no-sandbox --disable-gpu"
-os.environ["GOOGLE_CHROME_ARGS"] = "--disable-dev-shm-usage --no-sandbox --disable-gpu"
 
 def update_cookies_and_tokens(bot):
     """Snapshot cookies and CSRF token to RAM."""
     try:
-        # 1. Get CSRF Token (Safe & Fast)
+        # 1. Get CSRF Token
         sb = bot.sb if hasattr(bot, 'sb') else bot
         try:
             csrf = sb.get_attribute('meta[name="csrf-token"]', "content")
@@ -27,6 +26,7 @@ def update_cookies_and_tokens(bot):
             pass
     except Exception as e:
         log(f"Token Sync Warning: {e}", "WARN")
+        # Fatal errors that require restart
         if "connectable" in str(e) or "refused" in str(e) or "process is dead" in str(e):
             raise e
 
@@ -45,159 +45,67 @@ def get_socket_io_creds(bot):
         pass
     return False
 
-def smart_click_captcha(sb):
-    """
-    Attempts to click the Cloudflare widget using Smart Coordinates
-    and Shadow DOM piercing (bypasses standard selectors).
-    """
-    try:
-        log("🖱️ Attempting Smart GUI Click...", "INFO")
-        
-        # METHOD 1: JS Shadow DOM Pierce (Most Reliable for invisible iframes)
-        # Finds the checkbox inside the closed shadow-root of Cloudflare
-        sb.execute_script("""
-            function clickShadow() {
-                let host = document.querySelector('div.cf-turnstile') || document.querySelector('div.cf-turnstile-wrapper');
-                if (host && host.shadowRoot) {
-                    let btn = host.shadowRoot.querySelector('input') || host.shadowRoot.querySelector('iframe');
-                    if (btn) { btn.click(); return true; }
-                }
-                return false;
-            }
-            clickShadow();
-        """)
-        
-        # METHOD 2: Center Grid Click (Simulated Human Click)
-        # We click 3 points in the vertical center where the box usually is
-        # Screen is 1920x1080. Center is (960, 540).
-        # We click offsets: Center, Center+40px, Center+80px
-        
-        # Note: We use JS to synthesize a click at these coords because
-        # actions.move_to() can be flaky in headless docker without XVFB.
-        
-        js_click_coords = """
-            function clickAt(x, y) {
-                var el = document.elementFromPoint(x, y);
-                if (el) el.click();
-            }
-            clickAt(960, 540);      // Exact Center
-            clickAt(960, 580);      // Slightly Lower
-            clickAt(960, 500);      // Slightly Higher
-        """
-        sb.execute_script(js_click_coords)
-        log("✅ Fired Smart Grid Clicks (Center Screen)", "OK")
-        return True
-
-    except Exception as e:
-        log(f"Smart Click Failed: {e}", "WARN")
-        return False
-
-def solve_captcha(bot):
-    """
-    Checks for and interacts with various Cloudflare/Turnstile CAPTCHAs.
-    """
-    sb = bot.sb if hasattr(bot, 'sb') else bot
-    acted = False
-    
-    try:
-        title = sb.get_title()
-        
-        # --- SCENARIO 1: Cloudflare "Just a moment..." ---
-        if "Just a moment" in title or sb.is_element_visible('iframe[src*="cloudflare"]'):
-            log("🤖 Cloudflare Challenge Detected", "WARN")
-            
-            # A. Try Standard Iframe Switch
-            if sb.is_element_visible('iframe[src*="cloudflare"]'):
-                sb.switch_to_frame('iframe[src*="cloudflare"]')
-                time.sleep(0.5)
-                if sb.is_element_visible("#challenge-stage"):
-                    sb.click("#challenge-stage")
-                    acted = True
-                elif sb.is_element_visible('input[type="checkbox"]'):
-                    sb.click('input[type="checkbox"]')
-                    acted = True
-                sb.switch_to_default_content()
-                
-                if acted: 
-                    log("✅ Clicked inside Iframe", "OK")
-                    return True
-            
-            # B. If Iframe failed or not found, use SMART CLICK
-            log("⚠️ Standard selector failed. Engaging Smart Click...", "WARN")
-            return smart_click_captcha(sb)
-
-        # --- SCENARIO 2: Generic Checkbox ---
-        if sb.is_element_visible('input[type="checkbox"]'):
-            sb.click('input[type="checkbox"]')
-            log("✅ Clicked Generic Checkbox", "OK")
-            return True
-
-    except Exception as e:
-        log(f"Captcha logic error: {e}", "WARN")
-    
-    return False
-
 def login_sequence(bot):
-    """Performs the full login sequence."""
+    """
+    Performs login using StealthBot's built-in evasion logic.
+    """
     sb = bot.sb if hasattr(bot, 'sb') else bot
     
     log(f"🌐 Navigating to {config.LOGIN_URL}...", "INFO")
-    try:
-        sb.open(config.LOGIN_URL) 
-    except Exception as e:
-        log(f"Navigation failed: {e}", "ERROR")
-        return False
-        
-    log("⏳ Waiting for Login Form or Captcha...", "INFO")
     
-    max_retries = 25 
-    for i in range(max_retries):
-        # A. Check for Form
-        if sb.is_element_visible("#card-email"):
-            log("✅ Login Form Detected!", "OK")
-            break
-        
-        # B. Check for Captcha / "Just a moment"
-        if solve_captcha(bot):
-            log("⏳ Captcha interaction... waiting for reload.", "INFO")
-            time.sleep(8) 
-            continue
-            
-        # C. Check if already logged in
-        if "portal" in sb.get_current_url() or "live" in sb.get_current_url():
-            log("✅ Already logged in", "OK")
-            break
+    # 1. Use safe_get()
+    # This automatically waits for body, checks for "Challenge"/"Turnstile", 
+    # and auto-solves it using uc_gui_click_captcha.
+    try:
+        bot.safe_get(config.LOGIN_URL)
+    except Exception as e:
+        log(f"Safe Navigation failed: {e}", "ERROR")
+        return False
 
-        time.sleep(3)
-        if i == max_retries - 1:
-            log("❌ Login form never appeared.", "ERROR")
-            log(f"Stuck on Page: {sb.get_title()}", "WARN")
-            return False
+    # 2. Check if we are already logged in (Redirected immediately)
+    if "portal" in sb.get_current_url() or "live" in sb.get_current_url():
+        log("✅ Already logged in (Session active)", "OK")
+        time.sleep(5)
+        update_cookies_and_tokens(bot)
+        get_socket_io_creds(bot)
+        return True
 
-    # --- TYPING ---
+    # 3. Wait for Login Form
+    log("⏳ Waiting for credentials fields...", "INFO")
+    try:
+        sb.wait_for_element("#card-email", timeout=20)
+    except:
+        log("❌ Login form not found (Bot might be stuck on uncaught captcha).", "ERROR")
+        return False
+
+    # 4. Enter Credentials
     log("⌨️ Entering Credentials...", "INFO")
     try:
+        # Human-like typing is handled by the InputStrategy injected in init
         sb.type("#card-email", config.IVASMS_EMAIL)
         sb.type("#card-password", config.IVASMS_PASSWORD)
     except Exception as e:
         log(f"⚠️ Typing Failed: {e}", "WARN")
 
-    # --- CLICKING ---
+    # 5. Smart Click Login
+    # Uses 'smart_click' which checks for challenges before clicking 
+    # and attempts a human-like click.
     log("⌨️ Clicking Login...", "INFO")
     try:
-        # Try JS click for reliability
+        bot.smart_click('button[type="submit"]')
+    except Exception as e:
+        log(f"Smart Click Failed: {e}", "ERROR")
+        # Fallback to JS if smart click fails
         sb.execute_script("document.querySelector('button[type=\"submit\"]').click()")
-    except:
-        pass
 
     log("⏳ Waiting for redirect...", "INFO")
     time.sleep(15)
 
-    # --- CHECK SUCCESS ---
+    # 6. Verify Success
     current_url = sb.get_current_url()
     if "login" not in current_url and ("portal" in current_url or "live" in current_url):
         log("✅ Login Successful!", "OK")
-        time.sleep(15) 
+        time.sleep(10) # Cooldown for heavy dashboard render
         update_cookies_and_tokens(bot)
         get_socket_io_creds(bot)
         return True
@@ -206,26 +114,37 @@ def login_sequence(bot):
         return False
 
 def browser_thread_target():
-    """Main Thread: Auto-restarts browser if it crashes."""
+    """
+    Main Thread: Auto-restarts browser if it crashes.
+    """
     my_input = HumanInputStrategy()
 
     while not state.shutdown_event.is_set():
         try:
             log("🚀 Launching Browser Session...", "INFO")
             
-            with StealthBot(headless=True, input_strategy=my_input) as bot:
+            # CRITICAL: headless=False per documentation.
+            # The wrapper automatically uses Xvfb on Linux servers.
+            with StealthBot(
+                headless=False, 
+                input_strategy=my_input,
+                success_criteria=None  # We handle success check manually in login_sequence
+            ) as bot:
+                
                 state.driver_ref = bot
                 sb = bot.sb if hasattr(bot, 'sb') else bot
 
                 try: sb.set_window_size(1920, 1080)
                 except: pass
                 
+                # 1. Login
                 if not login_sequence(bot):
                     send_sync_message("❌ <b>Bot Login Failed - Retrying...</b>")
                     log("🔄 Login failed. Restarting browser session in 5s...", "WARN")
                     time.sleep(5)
                     continue 
 
+                # 2. Monitor Loop
                 send_sync_message("✅ <b>Bot Logged In</b>")
                 log("🕵️ Browser entering monitoring loop...", "INFO")
                 
@@ -234,8 +153,12 @@ def browser_thread_target():
                     update_cookies_and_tokens(bot)
 
                     if not state.current_livesms_token:
-                        if hasattr(bot, 'safe_get'): bot.safe_get(config.LIVE_SMS_URL)
-                        else: sb.open(config.LIVE_SMS_URL)
+                        # Use safe_get here too for robustness
+                        if hasattr(bot, 'safe_get'): 
+                            bot.safe_get(config.LIVE_SMS_URL)
+                        else: 
+                            sb.open(config.LIVE_SMS_URL)
+                            
                         time.sleep(5)
                         get_socket_io_creds(bot)
                     
