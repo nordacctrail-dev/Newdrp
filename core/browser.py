@@ -18,8 +18,9 @@ def update_cookies_and_tokens(bot):
             driver = bot.sb.driver
             
         if driver:
-            # Check if driver is alive before fetching
+            # Check if driver is alive before fetching to prevent crashes
             if hasattr(driver, "service") and not driver.service.is_connectable():
+                 # Force a re-raise to trigger the browser restart logic
                 raise ConnectionError("Driver is not connectable")
 
             cookies = driver.get_cookies()
@@ -42,7 +43,7 @@ def update_cookies_and_tokens(bot):
             
     except Exception as e:
         log(f"Cookie Sync Warning: {e}", "WARN")
-        # Re-raise if it's a fatal connection error so we can restart the browser
+        # Re-raise fatal errors so the main loop knows to restart the browser
         if "Connection refused" in str(e) or "Max retries exceeded" in str(e) or "not connectable" in str(e):
             raise e
 
@@ -78,6 +79,7 @@ def login_sequence(bot):
     # --- CAPTCHA CHECK ---
     log("🛡️ Checking for CAPTCHA...", "INFO")
     try:
+        # Check title to see where we are
         log(f"Current Page Title: {sb.get_title()}", "INFO")
         
         if sb.is_element_visible('iframe[src*="cloudflare"]'):
@@ -130,8 +132,8 @@ def login_sequence(bot):
     if "login" not in current_url and ("portal" in current_url or "live" in current_url):
         log("✅ Login Successful!", "OK")
         
-        # CRITICAL FIX: Give the browser time to settle after redirect before touching cookies
-        # This prevents "Connection Refused" if the renderer is still busy swapping pages
+        # CRITICAL FIX: Wait for redirect to settle before touching cookies
+        # This prevents the "Connection refused" error by letting the browser process finish loading
         time.sleep(5) 
         
         update_cookies_and_tokens(bot)
@@ -147,46 +149,16 @@ def browser_thread_target():
     """
     my_input = HumanInputStrategy()
 
-    # CRITICAL FIX: Arguments to prevent Docker Crashes
-    # We try to pass these to the stealth wrapper.
-    # If StealthBot does not accept 'extra_args', try 'browser_args' or remove this argument.
-    docker_args = [
-        "--no-sandbox",
-        "--disable-dev-shm-usage",  # Prevents /dev/shm shared memory crash
-        "--disable-gpu",
-        "--disable-setuid-sandbox"
-    ]
-    
-    # Format args as a single string if that is what your wrapper expects, 
-    # but usually a list or passing them to SB options is best.
-    # Assuming StealthBot initializes SeleniumBase, we try to pass arguments via a common param.
-
     while not state.shutdown_event.is_set():
         try:
             log("🚀 Launching Browser Session...", "INFO")
             
-            # ATTEMPT TO PASS ARGS:
-            # We are guessing StealthBot accepts kwargs that pass to SB/Driver.
-            # If this line errors, you need to edit your sb_stealth_wrapper.py to accept these args.
-            with StealthBot(
-                headless=True, 
-                input_strategy=my_input,
-                # Try passing these common SeleniumBase arguments
-                binary_location=config.CHROMIUM_BINARY,
-                extension_dir=None,
-                user_data_dir=None,
-                # If your wrapper exposes a way to add args, add them here:
-                # args=docker_args 
-            ) as bot:
-                
-                # Manual Injection of Args if wrapper doesn't support them directly
-                # (This only works if done BEFORE driver start, which is hard with a Context Manager)
-                # So we rely on the wrapper defaults or environment variables.
-                
+            # REVERTED: Removed 'binary_location' and other args that caused the crash.
+            # We rely on the wrapper's defaults.
+            with StealthBot(headless=True, input_strategy=my_input) as bot:
                 state.driver_ref = bot
                 sb = bot.sb if hasattr(bot, 'sb') else bot
 
-                # Force window size
                 try: sb.set_window_size(1920, 1080)
                 except: pass
                 
