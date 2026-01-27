@@ -13,7 +13,6 @@ def update_cookies_and_tokens(bot):
     """Snapshot cookies and CSRF token to RAM."""
     try:
         # 1. Get Cookies
-        # Robust check to find driver in bot or bot.sb
         driver = getattr(bot, "driver", None)
         if not driver and hasattr(bot, "sb"):
             driver = bot.sb.driver
@@ -22,7 +21,6 @@ def update_cookies_and_tokens(bot):
             cookies = driver.get_cookies()
             simple_cookies = {}
             for c in cookies:
-                # Filter for IVASMS cookies
                 if "ivasms" in c.get("domain", "") or "ivasms" in c.get("name", ""):
                     simple_cookies[c['name']] = c['value']
             
@@ -32,7 +30,6 @@ def update_cookies_and_tokens(bot):
         # 2. Get CSRF Token
         sb = bot.sb if hasattr(bot, 'sb') else bot
         try:
-            # Try getting meta tag
             csrf = sb.get_attribute('meta[name="csrf-token"]', "content")
             if csrf:
                 state.current_csrf_token = csrf
@@ -41,7 +38,6 @@ def update_cookies_and_tokens(bot):
             
     except Exception as e:
         log(f"Cookie Sync Warning: {e}", "WARN")
-        # If connection is refused, this will raise and trigger a restart in the main loop
         if "Connection refused" in str(e) or "Max retries exceeded" in str(e):
             raise e
 
@@ -66,23 +62,33 @@ def login_sequence(bot):
     sb = bot.sb if hasattr(bot, 'sb') else bot
     
     log(f"🌐 Navigating to {config.LOGIN_URL}...", "INFO")
-    bot.safe_get(config.LOGIN_URL)
+    try:
+        bot.safe_get(config.LOGIN_URL)
+    except Exception as e:
+        log(f"Navigation failed: {e}", "ERROR")
+        return False
+        
     time.sleep(5)
 
     # --- CAPTCHA CHECK ---
     log("🛡️ Checking for CAPTCHA...", "INFO")
     try:
+        # Check title to see where we are
+        log(f"Current Page Title: {sb.get_title()}", "INFO")
+        
         if sb.is_element_visible('iframe[src*="cloudflare"]'):
+            log("🤖 Cloudflare iframe detected.", "WARN")
             sb.switch_to_frame('iframe[src*="cloudflare"]')
             time.sleep(1)
             if sb.is_element_visible("#challenge-stage"):
                 sb.click("#challenge-stage")
+                log("✅ Clicked Cloudflare Challenge", "OK")
             sb.switch_to_default_content()
         elif sb.is_element_visible('input[type="checkbox"]'):
              sb.click('input[type="checkbox"]')
              log("✅ Clicked Generic Captcha", "OK")
-    except:
-        pass
+    except Exception as e:
+        log(f"Captcha check error: {e}", "WARN")
 
     # --- WAIT FOR FORM ---
     log("⏳ Waiting for login form...", "INFO")
@@ -90,6 +96,9 @@ def login_sequence(bot):
         sb.wait_for_element("#card-email", timeout=40)
     except:
         log("❌ Login form not found.", "ERROR")
+        # Log source snippet to debug what page we are actually on
+        src = sb.get_page_source()[:500]
+        log(f"Page Source Snippet: {src}", "WARN")
         return False
 
     # --- TYPING ---
@@ -108,7 +117,6 @@ def login_sequence(bot):
         time.sleep(0.5)
         sb.click(submit_selector)
     except:
-        # JS Fallback
         sb.execute_script("document.querySelector('button[type=\"submit\"]').click()")
 
     log("⏳ Waiting for redirect...", "INFO")
@@ -131,7 +139,6 @@ def browser_thread_target():
     """
     my_input = HumanInputStrategy()
 
-    # Outer loop to restart browser on crash
     while not state.shutdown_event.is_set():
         try:
             log("🚀 Launching Browser Session...", "INFO")
@@ -140,39 +147,37 @@ def browser_thread_target():
                 state.driver_ref = bot
                 sb = bot.sb if hasattr(bot, 'sb') else bot
 
-                # Set size
                 try: sb.set_window_size(1920, 1080)
                 except: pass
                 
-                # Login
-                if login_sequence(bot):
-                    send_sync_message("✅ <b>Bot Logged In</b>")
-                else:
-                    send_sync_message("❌ <b>Bot Login Failed</b>")
-                
-                # Monitoring Loop
+                # 1. Try to Login
+                if not login_sequence(bot):
+                    send_sync_message("❌ <b>Bot Login Failed - Retrying...</b>")
+                    log("🔄 Login failed. Restarting browser session in 5s...", "WARN")
+                    time.sleep(5)
+                    continue # <--- THIS RESTARTS THE BROWSER IMMEDIATELY
+
+                # 2. If Login Succeeded, START Monitor
+                send_sync_message("✅ <b>Bot Logged In</b>")
                 log("🕵️ Browser entering monitoring loop...", "INFO")
                 
                 while not state.shutdown_event.is_set():
                     time.sleep(10)
                     
-                    # Refresh Cookies (Raises error if driver died)
                     update_cookies_and_tokens(bot)
 
-                    # Refresh Socket Token
                     if not state.current_livesms_token:
                         if hasattr(bot, 'safe_get'): bot.safe_get(config.LIVE_SMS_URL)
                         else: sb.open(config.LIVE_SMS_URL)
                         time.sleep(3)
                         get_socket_io_creds(bot)
                     
-                    # Check Session
                     if "login" in sb.get_current_url():
                         log("⚠️ Session Lost - Re-logging...", "WARN")
-                        login_sequence(bot)
+                        if not login_sequence(bot):
+                            break # Break inner loop to restart browser
 
         except Exception as e:
             log(f"💥 Browser Crashed: {e}", "ERROR")
             log("🔄 Restarting Browser in 5 seconds...", "INFO")
             time.sleep(5)
-            # Loop continues -> Restarts StealthBot
