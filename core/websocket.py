@@ -1,30 +1,35 @@
 import socketio
 import asyncio
+import ssl
 import state
 import config
 from utils import log, extract_otp
 from core.notifier import send_otp_notification
 
-# --- ENABLE DEBUG LOGGING ---
-# Set logger=True and engineio_logger=True to see the raw handshake
-sio = socketio.AsyncClient(logger=True, engineio_logger=True)
+# Initialize Async Client with SSL verification disabled
+# We create a custom SSL context that ignores certificate errors
+ssl_context = ssl.create_default_context()
+ssl_context.check_hostname = False
+ssl_context.verify_mode = ssl.CERT_NONE
+
+# Initialize Socket.IO Client
+# 'ssl' argument is not directly supported in AsyncClient init, 
+# so we handle it via the connector or simply rely on loose headers first.
+sio = socketio.AsyncClient(logger=True, engineio_logger=True, ssl_verify=False)
 
 @sio.event
 async def connect():
     log("🔌 WebSocket Connected!", "OK")
-    # Send handshake message specific to IVASMS
     await sio.emit("40/livesms,")
 
 @sio.event
 async def connect_error(data):
-    # Log the full error data to see if it's a 403, 401, or 400
     log(f"WebSocket Connection Error: {data}", "ERROR")
 
 @sio.event
 async def disconnect():
     log("🔌 WebSocket Disconnected", "WARN")
 
-# Handle raw messages (IVASMS uses raw JSON arrays often)
 @sio.on('*')
 async def catch_all(event, data):
     payload = None
@@ -66,34 +71,39 @@ async def websocket_loop():
 
         try:
             if not sio.connected:
-                # DEBUG: Log the credentials we are about to use
                 log(f"🔍 DEBUG: Connecting with User: {state.current_livesms_user}", "INFO")
-                log(f"🔍 DEBUG: Connecting with Token: {state.current_livesms_token[:10]}...", "INFO")
                 
                 # Construct URL
                 base = config.WS_BASE.replace("wss://", "https://").replace("/socket.io/", "")
                 
-                # We commented out cookie fetching in browser.py to fix the crash.
-                # If cookies are empty, this might be why WS fails.
-                # Let's check if we have cookies.
-                if not state.current_cookies:
-                    log("⚠️ DEBUG: No cookies found in state! WS might fail.", "WARN")
+                # 1. PREPARE HEADERS (Crucial for bypassing blocks)
+                # We must mimic the browser exactly
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Origin": "https://www.ivasms.com",
+                    "Host": "ivasms.com:2087",
+                    "Accept-Language": "en-US,en;q=0.9",
+                }
                 
-                # Connect
+                # Add Cookies
+                if state.current_cookies:
+                    cookie_string = "; ".join([f"{k}={v}" for k,v in state.current_cookies.items()])
+                    headers["Cookie"] = cookie_string
+                else:
+                    log("⚠️ DEBUG: No cookies found! WS will likely fail.", "WARN")
+
+                # 2. CONNECT
                 await sio.connect(
                     base, 
                     socketio_path='socket.io',
                     transports=['websocket'],
-                    # Pass empty dict if cookies are None to avoid errors
-                    headers={'Cookie': "; ".join([f"{k}={v}" for k,v in state.current_cookies.items()])} if state.current_cookies else {},
+                    headers=headers,
                     auth={'token': state.current_livesms_token, 'user': state.current_livesms_user}
                 )
                 
             await sio.wait()
             
         except Exception as e:
-            # Print full exception traceback for clarity
-            import traceback
+            # Only log the error message to keep logs clean, or use e for debug
             log(f"WS Loop Exception: {e}", "ERROR")
-            traceback.print_exc()
             await asyncio.sleep(10) # Backoff
