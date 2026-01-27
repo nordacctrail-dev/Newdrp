@@ -31,21 +31,21 @@ class BrowserCore:
         if self.is_cloudflare(bot):
             print("🛡️ Cloudflare detected!")
             try:
-                # This calls the method we added to stealth_wrapper.py
-                bot.solve_captcha()
-                
-                # Wait for the challenge to complete/reload
+                if hasattr(bot, "solve_captcha"):
+                    bot.solve_captcha()
                 time.sleep(config.CLOUDFLARE_WAIT)
             except Exception as e:
                 print(f"⚠️ Captcha solve warning: {e}")
 
     def login(self, bot):
         """
-        Performs the login flow.
+        Performs the login flow with increased timeouts and debug screenshots.
         """
         print(f"🌐 Navigating to {config.LOGIN_URL}")
         bot.safe_get(config.LOGIN_URL)
-        time.sleep(5)
+        
+        # Increased initial wait for Railway
+        time.sleep(10)
 
         self.handle_cloudflare(bot)
 
@@ -56,6 +56,10 @@ class BrowserCore:
 
         print("⌨️ Entering credentials...")
         try:
+            # CRITICAL FIX: Explicit wait up to 30 seconds for the form
+            print("⏳ Waiting for login form (max 30s)...")
+            bot.sb.wait_for_element_visible("#card-email", timeout=30)
+            
             bot.type("#card-email", config.EMAIL)
             bot.type("#card-password", config.PASSWORD)
             
@@ -79,6 +83,10 @@ class BrowserCore:
 
         except Exception as e:
             print(f"❌ Login Exception: {e}")
+            # CAPTURE SCREENSHOT ON CRASH
+            print(f"📸 Taking debug screenshot: login_crash.png")
+            print(f"Current Page Title: {bot.driver.title}")
+            bot.save_screenshot("login_crash")
             return False
 
     def get_session_data(self, bot):
