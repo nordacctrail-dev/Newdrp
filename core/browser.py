@@ -1,6 +1,6 @@
 import time
 import re
-import os  # Added to set environment variables
+import os
 import state
 import config
 from utils import log
@@ -10,36 +10,33 @@ from core.notifier import send_sync_message
 from sb_stealth_wrapper import StealthBot
 from sb_stealth_wrapper.strategies.input import HumanInputStrategy
 
-# --- CRITICAL FIX: FORCE DOCKER FLAGS VIA ENV VARS ---
-# Since the wrapper rejects arguments, we try to force them into the environment
-# which underlying Chromium/Selenium often respects.
+# Force Docker flags via env vars
 os.environ["CHROME_ARGS"] = "--disable-dev-shm-usage --no-sandbox --disable-gpu"
 os.environ["GOOGLE_CHROME_ARGS"] = "--disable-dev-shm-usage --no-sandbox --disable-gpu"
 
 def update_cookies_and_tokens(bot):
     """Snapshot cookies and CSRF token to RAM."""
     try:
-        # 1. Get Cookies
-        driver = getattr(bot, "driver", None)
-        if not driver and hasattr(bot, "sb"):
-            driver = bot.sb.driver
-            
-        if driver:
-            # Check if driver is alive before fetching
-            if hasattr(driver, "service") and hasattr(driver.service, "process"):
-                if driver.service.process is None:
-                     raise ConnectionError("Driver process is dead")
+        # --- COOKIE FETCHING DISABLED BY REQUEST ---
+        # accessing driver.get_cookies() immediately after a heavy redirect 
+        # can crash the driver in low-memory environments.
+        # 
+        # driver = getattr(bot, "driver", None)
+        # if not driver and hasattr(bot, "sb"):
+        #     driver = bot.sb.driver
+        #     
+        # if driver:
+        #     cookies = driver.get_cookies()
+        #     simple_cookies = {}
+        #     for c in cookies:
+        #         if "ivasms" in c.get("domain", "") or "ivasms" in c.get("name", ""):
+        #             simple_cookies[c['name']] = c['value']
+        #     
+        #     if simple_cookies:
+        #         state.current_cookies = simple_cookies
+        # -------------------------------------------
 
-            cookies = driver.get_cookies()
-            simple_cookies = {}
-            for c in cookies:
-                if "ivasms" in c.get("domain", "") or "ivasms" in c.get("name", ""):
-                    simple_cookies[c['name']] = c['value']
-            
-            if simple_cookies:
-                state.current_cookies = simple_cookies
-
-        # 2. Get CSRF Token
+        # 2. Get CSRF Token (This is lighter than get_cookies)
         sb = bot.sb if hasattr(bot, 'sb') else bot
         try:
             csrf = sb.get_attribute('meta[name="csrf-token"]', "content")
@@ -49,8 +46,8 @@ def update_cookies_and_tokens(bot):
             pass
             
     except Exception as e:
-        log(f"Cookie Sync Warning: {e}", "WARN")
-        # Re-raise fatal connection errors to trigger restart
+        log(f"Token Sync Warning: {e}", "WARN")
+        # We still check for fatal errors even if cookie fetching is off
         if "connectable" in str(e) or "refused" in str(e) or "process is dead" in str(e):
             raise e
 
@@ -127,7 +124,6 @@ def login_sequence(bot):
         sb.execute_script("document.querySelector('button[type=\"submit\"]').click()")
 
     log("⏳ Waiting for redirect...", "INFO")
-    # Increased wait time to ensure URL changes before we check it
     time.sleep(15)
 
     # --- CHECK SUCCESS ---
@@ -135,11 +131,8 @@ def login_sequence(bot):
     if "login" not in current_url and ("portal" in current_url or "live" in current_url):
         log("✅ Login Successful!", "OK")
         
-        # CRITICAL FIX: Wait 20s for the heavy dashboard to fully render
-        # This prevents the "Driver not connectable" crash which happens if we
-        # query the driver while the container is out of memory.
-        log("⏳ Warming up session (20s)...", "INFO")
-        time.sleep(20) 
+        # Wait for render (kept this safety from previous fix)
+        time.sleep(15) 
         
         update_cookies_and_tokens(bot)
         get_socket_io_creds(bot)
@@ -158,7 +151,6 @@ def browser_thread_target():
         try:
             log("🚀 Launching Browser Session...", "INFO")
             
-            # Using standard init (no args) since wrapper rejects them
             with StealthBot(headless=True, input_strategy=my_input) as bot:
                 state.driver_ref = bot
                 sb = bot.sb if hasattr(bot, 'sb') else bot
@@ -183,10 +175,9 @@ def browser_thread_target():
                     update_cookies_and_tokens(bot)
 
                     if not state.current_livesms_token:
-                        # Only navigate if we REALLY need to, to avoid stress
                         if hasattr(bot, 'safe_get'): bot.safe_get(config.LIVE_SMS_URL)
                         else: sb.open(config.LIVE_SMS_URL)
-                        time.sleep(5) # Increased safety wait
+                        time.sleep(5)
                         get_socket_io_creds(bot)
                     
                     if "login" in sb.get_current_url():
