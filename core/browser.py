@@ -18,15 +18,13 @@ def update_cookies_and_tokens(bot):
     try:
         sb = bot.sb if hasattr(bot, 'sb') else bot
         
-        # --- NEW ROBUST COOKIE LOGIC (JS INJECTION) ---
+        # --- SMART JS COOKIE FETCH ---
         try:
-            # Execute JS to get the full cookie string directly from the browser
-            # This is 100% reliable and won't crash the driver
+            # Execute JS to get cookies without crashing driver
             cookie_str = sb.execute_script("return document.cookie;")
             
             if cookie_str:
                 simple_cookies = {}
-                # Parse the "key=value; key2=value2" string
                 for pair in cookie_str.split(";"):
                     if "=" in pair:
                         k, v = pair.strip().split("=", 1)
@@ -34,18 +32,13 @@ def update_cookies_and_tokens(bot):
                 
                 if simple_cookies:
                     state.current_cookies = simple_cookies
-                    # Log once to confirm
                     if not hasattr(update_cookies_and_tokens, "logged"):
-                        log(f"🍪 Cookies Synced via JS: {len(simple_cookies)} found", "INFO")
+                        log(f"🍪 Cookies Synced: {len(simple_cookies)} found", "INFO")
                         update_cookies_and_tokens.logged = True
-            else:
-                log("⚠️ JS returned empty cookies (Page loading?)", "WARN")
-
         except Exception as js_err:
             log(f"JS Cookie Fetch Failed: {js_err}", "ERROR")
-        # -----------------------------------------------
 
-        # 2. Get CSRF Token
+        # Get CSRF Token
         try:
             csrf = sb.get_attribute('meta[name="csrf-token"]', "content")
             if csrf:
@@ -74,7 +67,7 @@ def get_socket_io_creds(bot):
     return False
 
 def login_sequence(bot):
-    """Performs login using StealthBot's built-in evasion logic."""
+    """Performs login using smart waits instead of sleeps."""
     sb = bot.sb if hasattr(bot, 'sb') else bot
     
     log(f"🌐 Navigating to {config.LOGIN_URL}...", "INFO")
@@ -88,13 +81,13 @@ def login_sequence(bot):
     # Check if we are already logged in
     if "portal" in sb.get_current_url() or "live" in sb.get_current_url():
         log("✅ Already logged in (Session active)", "OK")
-        time.sleep(5)
         update_cookies_and_tokens(bot)
         get_socket_io_creds(bot)
         return True
 
     log("⏳ Waiting for credentials fields...", "INFO")
     try:
+        # Wait up to 20s for the element, but proceed instantly when found
         sb.wait_for_element("#card-email", timeout=20)
     except:
         log("❌ Login form not found.", "ERROR")
@@ -111,23 +104,32 @@ def login_sequence(bot):
     try:
         bot.smart_click('button[type="submit"]')
     except:
-        # Fallback to JS click if Human click fails
         sb.execute_script("document.querySelector('button[type=\"submit\"]').click()")
 
-    log("⏳ Waiting for redirect...", "INFO")
-    time.sleep(15)
+    log("⏳ Waiting for Redirect (Max 30s)...", "INFO")
+    
+    # --- SMART WAIT FOR REDIRECT ---
+    # We loop quickly to check URL change instead of sleeping 15s
+    start_time = time.time()
+    logged_in = False
+    
+    while time.time() - start_time < 30:
+        url = sb.get_current_url()
+        if "portal" in url or "live" in url:
+            logged_in = True
+            break
+        # Fast 1s poll
+        time.sleep(1)
 
-    current_url = sb.get_current_url()
-    if "login" not in current_url and ("portal" in current_url or "live" in current_url):
+    if logged_in:
         log("✅ Login Successful!", "OK")
-        time.sleep(5) 
         
-        # Capture cookies IMMEDIATELY so WS works
+        # Capture cookies IMMEDIATELY
         update_cookies_and_tokens(bot)
         get_socket_io_creds(bot)
         return True
     else:
-        log(f"❌ Login Failed. URL: {current_url}", "ERROR")
+        log(f"❌ Login Timeout. URL: {sb.get_current_url()}", "ERROR")
         return False
 
 def browser_thread_target():
@@ -139,7 +141,7 @@ def browser_thread_target():
             log("🚀 Launching Browser Session...", "INFO")
             
             with StealthBot(
-                headless=False, # Required for stealth
+                headless=False,
                 input_strategy=my_input,
                 success_criteria=None 
             ) as bot:
@@ -152,22 +154,23 @@ def browser_thread_target():
                 
                 if not login_sequence(bot):
                     send_sync_message("❌ <b>Bot Login Failed - Retrying...</b>")
-                    log("🔄 Login failed. Restarting browser session in 5s...", "WARN")
-                    time.sleep(5)
+                    log("🔄 Login failed. Retrying...", "WARN")
+                    time.sleep(3)
                     continue 
 
                 send_sync_message("✅ <b>Bot Logged In</b>")
                 log("🕵️ Browser entering monitoring loop...", "INFO")
                 
                 while not state.shutdown_event.is_set():
+                    # Poll every 10s for token updates
                     time.sleep(10)
-                    # Regularly update cookies to keep WS alive
                     update_cookies_and_tokens(bot)
 
                     if not state.current_livesms_token:
                         if hasattr(bot, 'safe_get'): bot.safe_get(config.LIVE_SMS_URL)
                         else: sb.open(config.LIVE_SMS_URL)
-                        time.sleep(5)
+                        # Give it a moment to render JS
+                        time.sleep(3) 
                         get_socket_io_creds(bot)
                     
                     if "login" in sb.get_current_url():
