@@ -16,10 +16,16 @@ class BrowserCore:
     def is_cloudflare(self, bot):
         """Checks if the current page is a Cloudflare challenge."""
         try:
-            title = bot.driver.title.lower()
-            src = bot.driver.page_source.lower()
-            if "just a moment" in title or "verify you are human" in src or "challenge" in src:
-                return True
+            # We use a safer check that won't crash if driver is busy
+            src = bot.get_page_source()
+            if not src: return False
+            src = src.lower()
+            
+            # Common Cloudflare markers
+            if "just a moment" in src: return True
+            if "verify you are human" in src: return True
+            if "challenge-platform" in src: return True
+            if "cf-turnstile" in src: return True
         except:
             pass
         return False
@@ -29,24 +35,29 @@ class BrowserCore:
         Uses the wrapper's solve_captcha method (CDP based).
         """
         if self.is_cloudflare(bot):
-            print("🛡️ Cloudflare detected!")
+            print("🛡️ Cloudflare detected! Attempting sb.solve_captcha()...")
             try:
                 if hasattr(bot, "solve_captcha"):
                     bot.solve_captcha()
                 time.sleep(config.CLOUDFLARE_WAIT)
+                
+                # Double check: did it work?
+                if self.is_cloudflare(bot):
+                    print("⚠️ Still stuck on Cloudflare after solve attempt.")
             except Exception as e:
                 print(f"⚠️ Captcha solve warning: {e}")
 
     def login(self, bot):
         """
-        Performs the login flow with increased timeouts and debug screenshots.
+        Performs the login flow with robust crash handling.
         """
         print(f"🌐 Navigating to {config.LOGIN_URL}")
         bot.safe_get(config.LOGIN_URL)
         
-        # Increased initial wait for Railway
-        time.sleep(10)
+        # Wait for initial load
+        time.sleep(8)
 
+        # 1. IMMEDIATE Cloudflare Check (Before looking for email)
         self.handle_cloudflare(bot)
 
         # Check if we are already logged in
@@ -56,10 +67,17 @@ class BrowserCore:
 
         print("⌨️ Entering credentials...")
         try:
-            # CRITICAL FIX: Explicit wait up to 30 seconds for the form
+            # 2. Check if email field exists. If not, check Cloudflare AGAIN.
+            if not bot.is_element_visible("#card-email"):
+                print("⚠️ Email field not found immediately. Checking Cloudflare again...")
+                self.handle_cloudflare(bot)
+                time.sleep(3)
+
+            # 3. Now wait explicitly (The step that was failing)
             print("⏳ Waiting for login form (max 30s)...")
             bot.sb.wait_for_element_visible("#card-email", timeout=30)
             
+            # Form actions
             bot.type("#card-email", config.EMAIL)
             bot.type("#card-password", config.PASSWORD)
             
@@ -70,23 +88,26 @@ class BrowserCore:
             
             print("🚀 Login clicked. Waiting for redirect...")
             time.sleep(10)
-
             self.handle_cloudflare(bot)
 
             if "live/my_sms" in bot.get_current_url() or "portal" in bot.get_current_url():
                 print("✅ Login Successful!")
                 return True
             else:
-                print("❌ Login Failed.")
+                print("❌ Login Failed (Check credentials).")
                 bot.save_screenshot("login_failed")
                 return False
 
         except Exception as e:
-            print(f"❌ Login Exception: {e}")
-            # CAPTURE SCREENSHOT ON CRASH
-            print(f"📸 Taking debug screenshot: login_crash.png")
-            print(f"Current Page Title: {bot.driver.title}")
-            bot.save_screenshot("login_crash")
+            print(f"❌ Login Error: {e}")
+            
+            # SAFELY attempt screenshot (Prevent 'Connection refused' crash)
+            try:
+                print("📸 Attempting crash screenshot...")
+                bot.save_screenshot("login_crash")
+            except Exception as shot_err:
+                print(f"⚠️ Could not take screenshot (Browser likely dead): {shot_err}")
+                
             return False
 
     def get_session_data(self, bot):
@@ -112,7 +133,8 @@ class BrowserCore:
             user_agent = bot.execute_script("return navigator.userAgent;")
 
         except Exception as e:
-            print(f"⚠️ Failed to extract session data: {e}")
+            # Don't print spammy errors if just a momentary glitch
+            pass
 
         return cookies, csrf_token, user_agent
 

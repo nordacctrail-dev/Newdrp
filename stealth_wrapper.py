@@ -11,10 +11,27 @@ class StealthBot:
         self.driver = None
 
     def __enter__(self):
-        # Start SB with UC mode enabled for anti-detect features
-        self.sb_context = SB(uc=True, headless=self.headless)
+        # uc=True enables Undetected Chromedriver (The core Stealth feature)
+        # We add extra arguments to help bypass Cloudflare on Railway
+        self.sb_context = SB(
+            uc=True, 
+            headless=self.headless,
+            browser="chrome",
+            # Force a standard resolution to prevent "Headless" dimension detection
+            agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            block_images=True,  # Saves bandwidth, speeds up load
+        )
         self.sb = self.sb_context.__enter__()
         self.driver = self.sb.driver
+        
+        # Explicitly set window size (Fixes many headless detection scripts)
+        self.driver.execute_cdp_cmd('Emulation.setDeviceMetricsOverride', {
+            "width": 1920,
+            "height": 1080,
+            "deviceScaleFactor": 1,
+            "mobile": False
+        })
+        
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -34,30 +51,31 @@ class StealthBot:
         except Exception as e:
             print(f"⚠️ Screenshot failed: {e}")
 
+    def get_page_source(self):
+        """Wrapper to get page source safely."""
+        try:
+            return self.sb.get_page_source()
+        except:
+            return ""
+
     def type(self, selector, text):
-        """Wrapper for typing text."""
         self.sb.type(selector, text)
 
     def click(self, selector):
-        """Wrapper for clicking elements."""
         self.sb.click(selector)
     
     def is_element_visible(self, selector):
-        """Wrapper to check visibility."""
         return self.sb.is_element_visible(selector)
         
     def get_current_url(self):
-        """Wrapper to get URL."""
         return self.sb.get_current_url()
 
     def execute_script(self, script):
-        """Wrapper to run JS."""
         return self.sb.execute_script(script)
 
     def solve_captcha(self):
         """
         Direct wrapper for SeleniumBase's CDP captcha solver.
-        This is the method used instead of GUI clicks.
         """
         if hasattr(self.sb, "solve_captcha"):
             print("🤖 Executing sb.solve_captcha()...")
