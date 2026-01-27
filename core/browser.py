@@ -1,5 +1,6 @@
 import time
 import re
+import os  # Added to set environment variables
 import state
 import config
 from utils import log
@@ -8,6 +9,12 @@ from core.notifier import send_sync_message
 # Strictly using your stealth wrapper
 from sb_stealth_wrapper import StealthBot
 from sb_stealth_wrapper.strategies.input import HumanInputStrategy
+
+# --- CRITICAL FIX: FORCE DOCKER FLAGS VIA ENV VARS ---
+# Since the wrapper rejects arguments, we try to force them into the environment
+# which underlying Chromium/Selenium often respects.
+os.environ["CHROME_ARGS"] = "--disable-dev-shm-usage --no-sandbox --disable-gpu"
+os.environ["GOOGLE_CHROME_ARGS"] = "--disable-dev-shm-usage --no-sandbox --disable-gpu"
 
 def update_cookies_and_tokens(bot):
     """Snapshot cookies and CSRF token to RAM."""
@@ -18,10 +25,10 @@ def update_cookies_and_tokens(bot):
             driver = bot.sb.driver
             
         if driver:
-            # Check if driver is alive before fetching to prevent crashes
-            if hasattr(driver, "service") and not driver.service.is_connectable():
-                 # Force a re-raise to trigger the browser restart logic
-                raise ConnectionError("Driver is not connectable")
+            # Check if driver is alive before fetching
+            if hasattr(driver, "service") and hasattr(driver.service, "process"):
+                if driver.service.process is None:
+                     raise ConnectionError("Driver process is dead")
 
             cookies = driver.get_cookies()
             simple_cookies = {}
@@ -43,8 +50,8 @@ def update_cookies_and_tokens(bot):
             
     except Exception as e:
         log(f"Cookie Sync Warning: {e}", "WARN")
-        # Re-raise fatal errors so the main loop knows to restart the browser
-        if "Connection refused" in str(e) or "Max retries exceeded" in str(e) or "not connectable" in str(e):
+        # Re-raise fatal connection errors to trigger restart
+        if "connectable" in str(e) or "refused" in str(e) or "process is dead" in str(e):
             raise e
 
 def get_socket_io_creds(bot):
@@ -79,9 +86,6 @@ def login_sequence(bot):
     # --- CAPTCHA CHECK ---
     log("🛡️ Checking for CAPTCHA...", "INFO")
     try:
-        # Check title to see where we are
-        log(f"Current Page Title: {sb.get_title()}", "INFO")
-        
         if sb.is_element_visible('iframe[src*="cloudflare"]'):
             log("🤖 Cloudflare iframe detected.", "WARN")
             sb.switch_to_frame('iframe[src*="cloudflare"]')
@@ -102,8 +106,6 @@ def login_sequence(bot):
         sb.wait_for_element("#card-email", timeout=40)
     except:
         log("❌ Login form not found.", "ERROR")
-        src = sb.get_page_source()[:500]
-        log(f"Page Source Snippet: {src}", "WARN")
         return False
 
     # --- TYPING ---
@@ -125,6 +127,7 @@ def login_sequence(bot):
         sb.execute_script("document.querySelector('button[type=\"submit\"]').click()")
 
     log("⏳ Waiting for redirect...", "INFO")
+    # Increased wait time to ensure URL changes before we check it
     time.sleep(15)
 
     # --- CHECK SUCCESS ---
@@ -132,9 +135,11 @@ def login_sequence(bot):
     if "login" not in current_url and ("portal" in current_url or "live" in current_url):
         log("✅ Login Successful!", "OK")
         
-        # CRITICAL FIX: Wait for redirect to settle before touching cookies
-        # This prevents the "Connection refused" error by letting the browser process finish loading
-        time.sleep(5) 
+        # CRITICAL FIX: Wait 20s for the heavy dashboard to fully render
+        # This prevents the "Driver not connectable" crash which happens if we
+        # query the driver while the container is out of memory.
+        log("⏳ Warming up session (20s)...", "INFO")
+        time.sleep(20) 
         
         update_cookies_and_tokens(bot)
         get_socket_io_creds(bot)
@@ -153,8 +158,7 @@ def browser_thread_target():
         try:
             log("🚀 Launching Browser Session...", "INFO")
             
-            # REVERTED: Removed 'binary_location' and other args that caused the crash.
-            # We rely on the wrapper's defaults.
+            # Using standard init (no args) since wrapper rejects them
             with StealthBot(headless=True, input_strategy=my_input) as bot:
                 state.driver_ref = bot
                 sb = bot.sb if hasattr(bot, 'sb') else bot
@@ -179,15 +183,16 @@ def browser_thread_target():
                     update_cookies_and_tokens(bot)
 
                     if not state.current_livesms_token:
+                        # Only navigate if we REALLY need to, to avoid stress
                         if hasattr(bot, 'safe_get'): bot.safe_get(config.LIVE_SMS_URL)
                         else: sb.open(config.LIVE_SMS_URL)
-                        time.sleep(3)
+                        time.sleep(5) # Increased safety wait
                         get_socket_io_creds(bot)
                     
                     if "login" in sb.get_current_url():
                         log("⚠️ Session Lost - Re-logging...", "WARN")
                         if not login_sequence(bot):
-                            break # Break inner loop to restart browser
+                            break 
 
         except Exception as e:
             log(f"💥 Browser Crashed: {e}", "ERROR")
