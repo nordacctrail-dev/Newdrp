@@ -49,11 +49,10 @@ def update_cookies_and_tokens(bot):
 
             else:
                 log(f"⚠️ No IVASMS cookies found (Attempt {attempt+1}/{max_retries})", "WARN")
-                time.sleep(2) # Wait for browser to write cookies
+                time.sleep(2) 
 
         except Exception as e:
             log(f"Cookie Sync Error (Attempt {attempt+1}): {e}", "WARN")
-            # If driver died, re-raise to trigger restart
             if "Connection refused" in str(e) or "Max retries exceeded" in str(e):
                 raise e
             time.sleep(2)
@@ -157,20 +156,18 @@ def browser_thread_target():
     extra_args = [
         "--disable-dev-shm-usage",  # Writes to /tmp (Prevents Crash)
         "--no-sandbox",             # Required for Docker
-        "--disable-gpu",
-        "--remote-debugging-port=9222"
+        "--disable-gpu"
     ]
 
     while not state.shutdown_event.is_set():
         try:
             log("🚀 Launching Browser Session...", "INFO")
             
+            # Removed uc_cdp_events and user_data_dir to avoid unexpected argument errors
             with StealthBot(
                 headless=True, 
                 input_strategy=my_input,
-                uc_cdp_events=True,
-                user_data_dir=None,
-                chromium_arg=",".join(extra_args) # Apply Memory Flags
+                chromium_arg=",".join(extra_args) 
             ) as bot:
                 
                 state.driver_ref = bot
