@@ -10,13 +10,36 @@ from core.notifier import send_sync_message
 from sb_stealth_wrapper import StealthBot
 from sb_stealth_wrapper.strategies.input import HumanInputStrategy
 
-# Keeps memory safety flags for Docker, even in headed mode
-os.environ["CHROME_ARGS"] = "--disable-dev-shm-usage --no-sandbox --disable-gpu"
+# 1. Force Headed Mode Env Vars (Safety Net)
+os.environ["HEADLESS"] = "0"
 
 def update_cookies_and_tokens(bot):
     """Snapshot cookies and CSRF token to RAM."""
     try:
-        # 1. Get CSRF Token
+        # 1. Get Cookies (RESTORED)
+        driver = getattr(bot, "driver", None)
+        if not driver and hasattr(bot, "sb"):
+            driver = bot.sb.driver
+            
+        if driver:
+            # Quick check if driver is alive
+            if hasattr(driver, "service") and not driver.service.is_connectable():
+                return 
+
+            cookies = driver.get_cookies()
+            simple_cookies = {}
+            for c in cookies:
+                # Store all relevant cookies
+                simple_cookies[c['name']] = c['value']
+            
+            if simple_cookies:
+                state.current_cookies = simple_cookies
+                # Log once if we get cookies for the first time
+                if len(simple_cookies) > 0 and not hasattr(update_cookies_and_tokens, "logged"):
+                    log(f"🍪 Cookies Synced ({len(simple_cookies)} found)", "INFO")
+                    update_cookies_and_tokens.logged = True
+
+        # 2. Get CSRF Token
         sb = bot.sb if hasattr(bot, 'sb') else bot
         try:
             csrf = sb.get_attribute('meta[name="csrf-token"]', "content")
@@ -24,9 +47,9 @@ def update_cookies_and_tokens(bot):
                 state.current_csrf_token = csrf
         except:
             pass
+            
     except Exception as e:
         log(f"Token Sync Warning: {e}", "WARN")
-        # Fatal errors that require restart
         if "connectable" in str(e) or "refused" in str(e) or "process is dead" in str(e):
             raise e
 
@@ -53,16 +76,14 @@ def login_sequence(bot):
     
     log(f"🌐 Navigating to {config.LOGIN_URL}...", "INFO")
     
-    # 1. Use safe_get()
-    # This automatically waits for body, checks for "Challenge"/"Turnstile", 
-    # and auto-solves it using uc_gui_click_captcha.
+    # Use safe_get() - Handles Challenges Automatically
     try:
         bot.safe_get(config.LOGIN_URL)
     except Exception as e:
         log(f"Safe Navigation failed: {e}", "ERROR")
         return False
 
-    # 2. Check if we are already logged in (Redirected immediately)
+    # Check if we are already logged in
     if "portal" in sb.get_current_url() or "live" in sb.get_current_url():
         log("✅ Already logged in (Session active)", "OK")
         time.sleep(5)
@@ -70,7 +91,7 @@ def login_sequence(bot):
         get_socket_io_creds(bot)
         return True
 
-    # 3. Wait for Login Form
+    # Wait for Login Form
     log("⏳ Waiting for credentials fields...", "INFO")
     try:
         sb.wait_for_element("#card-email", timeout=20)
@@ -78,34 +99,32 @@ def login_sequence(bot):
         log("❌ Login form not found (Bot might be stuck on uncaught captcha).", "ERROR")
         return False
 
-    # 4. Enter Credentials
+    # Enter Credentials
     log("⌨️ Entering Credentials...", "INFO")
     try:
-        # Human-like typing is handled by the InputStrategy injected in init
         sb.type("#card-email", config.IVASMS_EMAIL)
         sb.type("#card-password", config.IVASMS_PASSWORD)
     except Exception as e:
         log(f"⚠️ Typing Failed: {e}", "WARN")
 
-    # 5. Smart Click Login
-    # Uses 'smart_click' which checks for challenges before clicking 
-    # and attempts a human-like click.
+    # Smart Click Login
     log("⌨️ Clicking Login...", "INFO")
     try:
         bot.smart_click('button[type="submit"]')
     except Exception as e:
-        log(f"Smart Click Failed: {e}", "ERROR")
-        # Fallback to JS if smart click fails
+        log(f"Smart Click Failed: {e}", "WARN")
         sb.execute_script("document.querySelector('button[type=\"submit\"]').click()")
 
     log("⏳ Waiting for redirect...", "INFO")
     time.sleep(15)
 
-    # 6. Verify Success
+    # Verify Success
     current_url = sb.get_current_url()
     if "login" not in current_url and ("portal" in current_url or "live" in current_url):
         log("✅ Login Successful!", "OK")
         time.sleep(10) # Cooldown for heavy dashboard render
+        
+        # KEY FIX: Fetch cookies immediately after login
         update_cookies_and_tokens(bot)
         get_socket_io_creds(bot)
         return True
@@ -123,12 +142,10 @@ def browser_thread_target():
         try:
             log("🚀 Launching Browser Session...", "INFO")
             
-            # CRITICAL: headless=False per documentation.
-            # The wrapper automatically uses Xvfb on Linux servers.
             with StealthBot(
                 headless=False, 
                 input_strategy=my_input,
-                success_criteria=None  # We handle success check manually in login_sequence
+                success_criteria=None 
             ) as bot:
                 
                 state.driver_ref = bot
@@ -137,14 +154,12 @@ def browser_thread_target():
                 try: sb.set_window_size(1920, 1080)
                 except: pass
                 
-                # 1. Login
                 if not login_sequence(bot):
                     send_sync_message("❌ <b>Bot Login Failed - Retrying...</b>")
                     log("🔄 Login failed. Restarting browser session in 5s...", "WARN")
                     time.sleep(5)
                     continue 
 
-                # 2. Monitor Loop
                 send_sync_message("✅ <b>Bot Logged In</b>")
                 log("🕵️ Browser entering monitoring loop...", "INFO")
                 
@@ -153,12 +168,10 @@ def browser_thread_target():
                     update_cookies_and_tokens(bot)
 
                     if not state.current_livesms_token:
-                        # Use safe_get here too for robustness
                         if hasattr(bot, 'safe_get'): 
                             bot.safe_get(config.LIVE_SMS_URL)
                         else: 
                             sb.open(config.LIVE_SMS_URL)
-                            
                         time.sleep(5)
                         get_socket_io_creds(bot)
                     
