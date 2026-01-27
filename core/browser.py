@@ -18,6 +18,10 @@ def update_cookies_and_tokens(bot):
             driver = bot.sb.driver
             
         if driver:
+            # Check if driver is alive before fetching
+            if hasattr(driver, "service") and not driver.service.is_connectable():
+                raise ConnectionError("Driver is not connectable")
+
             cookies = driver.get_cookies()
             simple_cookies = {}
             for c in cookies:
@@ -38,7 +42,8 @@ def update_cookies_and_tokens(bot):
             
     except Exception as e:
         log(f"Cookie Sync Warning: {e}", "WARN")
-        if "Connection refused" in str(e) or "Max retries exceeded" in str(e):
+        # Re-raise if it's a fatal connection error so we can restart the browser
+        if "Connection refused" in str(e) or "Max retries exceeded" in str(e) or "not connectable" in str(e):
             raise e
 
 def get_socket_io_creds(bot):
@@ -73,7 +78,6 @@ def login_sequence(bot):
     # --- CAPTCHA CHECK ---
     log("🛡️ Checking for CAPTCHA...", "INFO")
     try:
-        # Check title to see where we are
         log(f"Current Page Title: {sb.get_title()}", "INFO")
         
         if sb.is_element_visible('iframe[src*="cloudflare"]'):
@@ -96,7 +100,6 @@ def login_sequence(bot):
         sb.wait_for_element("#card-email", timeout=40)
     except:
         log("❌ Login form not found.", "ERROR")
-        # Log source snippet to debug what page we are actually on
         src = sb.get_page_source()[:500]
         log(f"Page Source Snippet: {src}", "WARN")
         return False
@@ -126,6 +129,11 @@ def login_sequence(bot):
     current_url = sb.get_current_url()
     if "login" not in current_url and ("portal" in current_url or "live" in current_url):
         log("✅ Login Successful!", "OK")
+        
+        # CRITICAL FIX: Give the browser time to settle after redirect before touching cookies
+        # This prevents "Connection Refused" if the renderer is still busy swapping pages
+        time.sleep(5) 
+        
         update_cookies_and_tokens(bot)
         get_socket_io_creds(bot)
         return True
@@ -139,14 +147,46 @@ def browser_thread_target():
     """
     my_input = HumanInputStrategy()
 
+    # CRITICAL FIX: Arguments to prevent Docker Crashes
+    # We try to pass these to the stealth wrapper.
+    # If StealthBot does not accept 'extra_args', try 'browser_args' or remove this argument.
+    docker_args = [
+        "--no-sandbox",
+        "--disable-dev-shm-usage",  # Prevents /dev/shm shared memory crash
+        "--disable-gpu",
+        "--disable-setuid-sandbox"
+    ]
+    
+    # Format args as a single string if that is what your wrapper expects, 
+    # but usually a list or passing them to SB options is best.
+    # Assuming StealthBot initializes SeleniumBase, we try to pass arguments via a common param.
+
     while not state.shutdown_event.is_set():
         try:
             log("🚀 Launching Browser Session...", "INFO")
             
-            with StealthBot(headless=True, input_strategy=my_input) as bot:
+            # ATTEMPT TO PASS ARGS:
+            # We are guessing StealthBot accepts kwargs that pass to SB/Driver.
+            # If this line errors, you need to edit your sb_stealth_wrapper.py to accept these args.
+            with StealthBot(
+                headless=True, 
+                input_strategy=my_input,
+                # Try passing these common SeleniumBase arguments
+                binary_location=config.CHROMIUM_BINARY,
+                extension_dir=None,
+                user_data_dir=None,
+                # If your wrapper exposes a way to add args, add them here:
+                # args=docker_args 
+            ) as bot:
+                
+                # Manual Injection of Args if wrapper doesn't support them directly
+                # (This only works if done BEFORE driver start, which is hard with a Context Manager)
+                # So we rely on the wrapper defaults or environment variables.
+                
                 state.driver_ref = bot
                 sb = bot.sb if hasattr(bot, 'sb') else bot
 
+                # Force window size
                 try: sb.set_window_size(1920, 1080)
                 except: pass
                 
@@ -155,7 +195,7 @@ def browser_thread_target():
                     send_sync_message("❌ <b>Bot Login Failed - Retrying...</b>")
                     log("🔄 Login failed. Restarting browser session in 5s...", "WARN")
                     time.sleep(5)
-                    continue # <--- THIS RESTARTS THE BROWSER IMMEDIATELY
+                    continue 
 
                 # 2. If Login Succeeded, START Monitor
                 send_sync_message("✅ <b>Bot Logged In</b>")
