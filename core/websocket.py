@@ -3,18 +3,12 @@ import asyncio
 import ssl
 import state
 import config
+from urllib.parse import urlencode # Added for safe query string building
 from utils import log, extract_otp
 from core.notifier import send_otp_notification
 
-# Initialize Async Client with SSL verification disabled
-# We create a custom SSL context that ignores certificate errors
-ssl_context = ssl.create_default_context()
-ssl_context.check_hostname = False
-ssl_context.verify_mode = ssl.CERT_NONE
-
 # Initialize Socket.IO Client
-# 'ssl' argument is not directly supported in AsyncClient init, 
-# so we handle it via the connector or simply rely on loose headers first.
+# ssl_verify=False is crucial for custom ports like 2087
 sio = socketio.AsyncClient(logger=True, engineio_logger=True, ssl_verify=False)
 
 @sio.event
@@ -71,39 +65,47 @@ async def websocket_loop():
 
         try:
             if not sio.connected:
-                log(f"🔍 DEBUG: Connecting with User: {state.current_livesms_user}", "INFO")
+                log(f"🔍 DEBUG: Preparing WS Connection...", "INFO")
                 
-                # Construct URL
-                base = config.WS_BASE.replace("wss://", "https://").replace("/socket.io/", "")
+                # 1. Prepare Query Params (Token & User)
+                # The server expects these in the URL: .../?token=X&user=Y
+                params = {
+                    'token': state.current_livesms_token,
+                    'user': state.current_livesms_user
+                }
+                query_string = urlencode(params)
                 
-                # 1. PREPARE HEADERS (Crucial for bypassing blocks)
-                # We must mimic the browser exactly
+                # 2. Construct Full URL
+                # python-socketio takes the base URL and appends /socket.io/ automatically
+                # We append the query string to the base URL.
+                base_host = "https://ivasms.com:2087" 
+                connection_url = f"{base_host}?{query_string}"
+                
+                log(f"🔗 Connecting to: {base_host} with params", "INFO")
+
+                # 3. Headers
                 headers = {
                     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     "Origin": "https://www.ivasms.com",
                     "Host": "ivasms.com:2087",
-                    "Accept-Language": "en-US,en;q=0.9",
                 }
                 
-                # Add Cookies
+                # Add Cookies (Important!)
                 if state.current_cookies:
                     cookie_string = "; ".join([f"{k}={v}" for k,v in state.current_cookies.items()])
                     headers["Cookie"] = cookie_string
-                else:
-                    log("⚠️ DEBUG: No cookies found! WS will likely fail.", "WARN")
 
-                # 2. CONNECT
+                # 4. CONNECT
                 await sio.connect(
-                    base, 
+                    connection_url, 
                     socketio_path='socket.io',
                     transports=['websocket'],
-                    headers=headers,
-                    auth={'token': state.current_livesms_token, 'user': state.current_livesms_user}
+                    headers=headers
+                    # Note: We removed 'auth={...}' because we are passing creds in the URL now
                 )
                 
             await sio.wait()
             
         except Exception as e:
-            # Only log the error message to keep logs clean, or use e for debug
             log(f"WS Loop Exception: {e}", "ERROR")
-            await asyncio.sleep(10) # Backoff
+            await asyncio.sleep(10)
