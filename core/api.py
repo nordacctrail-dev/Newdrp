@@ -190,6 +190,12 @@ async def remove_range(range_name: str):
                     else:
                         return False, f"❌ Failed (HTTP {resp.status}) on chunk {i}: {text[:50]}"
             
+            # --- CRITICAL FIX: INSTANTLY REMOVE FROM LOCAL MEMORY ---
+            if range_name in state.numbers_data:
+                del state.numbers_data[range_name]
+                log(f"🗑️ Cleared {range_name} from local memory.", "INFO")
+            # --------------------------------------------------------
+
             return True, f"✅ Removed {total_removed} numbers from {range_name}"
 
     except Exception as e:
