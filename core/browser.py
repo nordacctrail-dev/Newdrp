@@ -19,17 +19,17 @@ def update_cookies_and_tokens(bot):
         sb = bot.sb if hasattr(bot, 'sb') else bot
         driver = getattr(bot, "driver", None) or sb.driver
         
-        # --- 1. CAPTURE USER-AGENT (CRITICAL) ---
-        try:
-            ua = driver.execute_script("return navigator.userAgent;")
-            if ua:
-                state.current_user_agent = ua
-                # Log it once so we know what we are working with
-                if not hasattr(update_cookies_and_tokens, "ua_logged"):
+        # --- 1. CAPTURE USER-AGENT (OPTIMIZED) ---
+        # Only fetch if we don't have it yet to prevent "Connection Refused" spam
+        if not getattr(state, "current_user_agent", None):
+            try:
+                ua = driver.execute_script("return navigator.userAgent;")
+                if ua:
+                    state.current_user_agent = ua
                     log(f"🕵️ Captured User-Agent: {ua[:30]}...", "INFO")
-                    update_cookies_and_tokens.ua_logged = True
-        except Exception as e:
-            log(f"UA Fetch Failed: {e}", "WARN")
+            except Exception as e:
+                # If browser is busy, just warn and try next loop
+                log(f"UA Fetch deferred (Browser busy): {str(e)[:50]}...", "WARN")
 
         # --- 2. CAPTURE COOKIES (CDP METHOD) ---
         try:
@@ -51,9 +51,7 @@ def update_cookies_and_tokens(bot):
                 if not hasattr(update_cookies_and_tokens, "logged"):
                     log(f"🍪 Cookies Synced ({len(simple_cookies)}): {', '.join(cookie_names[:3])}...", "INFO")
                     update_cookies_and_tokens.logged = True
-            else:
-                log("⚠️ CDP returned 0 cookies.", "WARN")
-
+            
         except Exception as e:
             log(f"CDP Cookie Fetch Failed: {e}", "ERROR")
 
@@ -67,6 +65,7 @@ def update_cookies_and_tokens(bot):
             
     except Exception as e:
         log(f"Token Sync Warning: {e}", "WARN")
+        # If the browser is truly dead, raise error to restart it
         if "connectable" in str(e) or "refused" in str(e) or "process is dead" in str(e):
             raise e
 
@@ -123,6 +122,7 @@ def login_sequence(bot):
 
     if "portal" in sb.get_current_url() or "live" in sb.get_current_url():
         log("✅ Already logged in (Session active)", "OK")
+        time.sleep(2) # Brief settle time
         update_cookies_and_tokens(bot)
         get_socket_io_creds(bot)
         return True
@@ -161,6 +161,7 @@ def login_sequence(bot):
 
     if logged_in:
         log("✅ Login Successful!", "OK")
+        time.sleep(3) # Give browser time to settle before querying data
         update_cookies_and_tokens(bot)
         get_socket_io_creds(bot)
         return True
