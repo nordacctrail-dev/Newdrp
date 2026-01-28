@@ -1,13 +1,14 @@
 import aiohttp
+import asyncio
 import state
 import config
 from utils import log
 import re
+import time
 
 async def get_headers_and_cookies():
     """
     Constructs headers and cookies using the LIVE browser state.
-    CRITICAL: Must use the browser's User-Agent to match the cookies.
     """
     cookies = state.current_cookies.copy()
     headers = config.NUMBERS_HEADERS.copy()
@@ -50,21 +51,33 @@ async def add_number(term_id: str):
 async def fetch_numbers():
     """
     Refreshes the list of numbers.
-    NOW LOOPS to fetch ALL numbers (Server-Side Pagination), not just the first 50.
+    LOOPS correctly to fetch ALL pages using strict DataTables params.
     """
     url = config.NUMBERS_BASE_URL
     headers, cookies = await get_headers_and_cookies()
     
-    # Fetch in chunks of 100 for speed
-    BATCH_SIZE = 100 
+    BATCH_SIZE = 50  # Match t3s.py (safe size)
     start = 0
+    draw = 1
     all_rows = []
+    
+    log("🔄 Starting bulk fetch of numbers...", "INFO")
     
     try:
         async with aiohttp.ClientSession(cookies=cookies) as session:
             while True:
+                # Exact params from t3s.py to ensure server behaves correctly
                 params = {
-                    "draw": "1",
+                    "draw": str(draw),
+                    "columns[0][data]": "number_id",
+                    "columns[0][name]": "id",
+                    "columns[0][orderable]": "false",
+                    "columns[1][data]": "Number",
+                    "columns[2][data]": "range",
+                    "columns[3][data]": "A2P",
+                    "columns[13][data]": "action",
+                    "order[0][column]": "1",
+                    "order[0][dir]": "desc",
                     "start": str(start),
                     "length": str(BATCH_SIZE),
                     "search[value]": ""
@@ -76,12 +89,19 @@ async def fetch_numbers():
 
                     data = await resp.json()
                     rows = data.get("data", [])
-                    total_records = int(data.get("recordsTotal", 0) or data.get("recordsFiltered", 0))
+                    
+                    # Determine Total Records (Handles 'recordsTotal' or 'recordsFiltered')
+                    total_records = data.get("recordsTotal") or data.get("recordsFiltered") or 0
+                    try:
+                        total_records = int(total_records)
+                    except:
+                        total_records = 0
                     
                     if not rows:
                         break
                         
                     all_rows.extend(rows)
+                    log(f"   Fetched {len(rows)} rows (Total: {len(all_rows)}/{total_records})", "INFO")
                     
                     # Stop if we fetched everything
                     if len(all_rows) >= total_records:
@@ -93,6 +113,8 @@ async def fetch_numbers():
                         
                     # Next Page
                     start += BATCH_SIZE
+                    draw += 1
+                    await asyncio.sleep(0.2) # Slight delay to be polite
                     
             # --- PROCESS ALL ROWS ---
             groups = {}
@@ -121,7 +143,7 @@ async def fetch_numbers():
                     })
 
             state.numbers_data = groups 
-            state.numbers_last_update = __import__("time").time()
+            state.numbers_last_update = time.time()
             
             total = sum(len(items) for items in groups.values())
             return True, f"Fetched {total} numbers in {len(groups)} ranges."
@@ -145,7 +167,7 @@ async def remove_range(range_name: str):
     headers, cookies = await get_headers_and_cookies()
     
     # Send chunks if too many numbers to avoid 413 Payload Too Large
-    CHUNK_SIZE = 500
+    CHUNK_SIZE = 100
     total_removed = 0
     
     try:
@@ -163,6 +185,8 @@ async def remove_range(range_name: str):
                     text = await resp.text()
                     if resp.status == 200:
                         total_removed += len(chunk_ids)
+                        log(f"Removed chunk {i}-{i+len(chunk_ids)}", "INFO")
+                        await asyncio.sleep(0.5)
                     else:
                         return False, f"❌ Failed (HTTP {resp.status}) on chunk {i}: {text[:50]}"
             
