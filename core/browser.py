@@ -17,24 +17,35 @@ def update_cookies_and_tokens(bot):
     """Snapshot cookies and CSRF token to RAM."""
     try:
         sb = bot.sb if hasattr(bot, 'sb') else bot
+        driver = getattr(bot, "driver", None) or sb.driver
         
-        # --- SMART JS COOKIE FETCH ---
+        # --- METHOD 2: NATIVE DRIVER COOKIES (Can see HttpOnly) ---
         try:
-            cookie_str = sb.execute_script("return document.cookie;")
-            if cookie_str:
-                simple_cookies = {}
-                for pair in cookie_str.split(";"):
-                    if "=" in pair:
-                        k, v = pair.strip().split("=", 1)
-                        simple_cookies[k] = v
-                
-                if simple_cookies:
-                    state.current_cookies = simple_cookies
-                    if not hasattr(update_cookies_and_tokens, "logged"):
-                        log(f"🍪 Cookies Synced: {len(simple_cookies)} found", "INFO")
-                        update_cookies_and_tokens.logged = True
-        except Exception as js_err:
-            log(f"JS Cookie Fetch Failed: {js_err}", "ERROR")
+            # We use the native driver method because JS cannot see HttpOnly cookies
+            # (which are usually the important ones for auth)
+            all_cookies = driver.get_cookies()
+            
+            simple_cookies = {}
+            cookie_names = []
+            
+            for c in all_cookies:
+                name = c.get('name')
+                value = c.get('value')
+                if name and value:
+                    simple_cookies[name] = value
+                    cookie_names.append(name)
+            
+            if simple_cookies:
+                state.current_cookies = simple_cookies
+                # Log the names so we know what we got
+                if not hasattr(update_cookies_and_tokens, "logged"):
+                    log(f"🍪 Cookies Synced ({len(simple_cookies)}): {', '.join(cookie_names)}", "INFO")
+                    update_cookies_and_tokens.logged = True
+            else:
+                log("⚠️ Driver returned 0 cookies.", "WARN")
+
+        except Exception as e:
+            log(f"Native Cookie Fetch Failed: {e}", "ERROR")
 
         # Get CSRF Token
         try:
@@ -46,11 +57,12 @@ def update_cookies_and_tokens(bot):
             
     except Exception as e:
         log(f"Token Sync Warning: {e}", "WARN")
+        # Only raise if it's a fatal driver disconnect
         if "connectable" in str(e) or "refused" in str(e) or "process is dead" in str(e):
             raise e
 
 def get_socket_io_creds(bot):
-    """Extracts JS variables for WebSocket auth (Matches t3s.py logic)."""
+    """Extracts JS variables for WebSocket auth."""
     try:
         sb = bot.sb if hasattr(bot, 'sb') else bot
         html = sb.get_page_source()
@@ -58,7 +70,7 @@ def get_socket_io_creds(bot):
         token = None
         user = None
 
-        # 1. Primary Regex (from t3s.py - looks for io.connect call)
+        # 1. Primary Regex (io.connect call)
         pattern = (
             r"io\.connect\('https://ivasms\.com:2087/livesms',\s*\{\s*query\s*:\s*\{\s*"
             r"token:\s*'([^']+)'[^}]*user:\"([^\"}]+)\""
@@ -79,7 +91,10 @@ def get_socket_io_creds(bot):
         if token and user:
             state.current_livesms_token = token
             state.current_livesms_user = user
-            log(f"🔑 Credentials Found: User={user}, Token={token[:10]}...", "OK")
+            # Only log once per unique token to avoid spam
+            if getattr(get_socket_io_creds, "last_token", None) != token:
+                log(f"🔑 Credentials Found: User={user}, Token={token[:10]}...", "OK")
+                get_socket_io_creds.last_token = token
             return True
             
     except Exception as e:
@@ -87,7 +102,7 @@ def get_socket_io_creds(bot):
     return False
 
 def login_sequence(bot):
-    """Performs login using smart waits instead of sleeps."""
+    """Performs login using smart waits."""
     sb = bot.sb if hasattr(bot, 'sb') else bot
     
     log(f"🌐 Navigating to {config.LOGIN_URL}...", "INFO")
@@ -140,7 +155,6 @@ def login_sequence(bot):
 
     if logged_in:
         log("✅ Login Successful!", "OK")
-        # Capture cookies IMMEDIATELY
         update_cookies_and_tokens(bot)
         get_socket_io_creds(bot)
         return True
