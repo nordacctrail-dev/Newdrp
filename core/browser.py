@@ -84,75 +84,47 @@ def get_socket_io_creds(bot):
     return False
 
 def login_sequence(bot):
-    """Performs login with DETAILED DEBUGGING for Cloudflare loops."""
+    """Performs login using specific CDP Mode sequence."""
     sb = bot.sb if hasattr(bot, 'sb') else bot
     
-    log(f"🌐 Navigating to {config.LOGIN_URL}...", "INFO")
+    log(f"🌐 Navigating to {config.LOGIN_URL} via CDP Mode...", "INFO")
     
     try:
-        sb.activate_cdp_mode(config.LOGIN_URL) 
-    except:
-        try:
-            bot.safe_get(config.LOGIN_URL)
-        except Exception as e:
-            log(f"Navigation error: {e}", "WARN")
-
-    log("⏳ Waiting for Login Page or Captcha...", "INFO")
-    
-    for i in range(20): 
-        # Check success first
-        if "portal" in sb.get_current_url() or "live" in sb.get_current_url():
-            log("✅ Already logged in!", "OK")
-            update_cookies_and_tokens(bot)
-            get_socket_io_creds(bot)
-            return True
-
-        # Check for Login Form
-        if sb.is_element_visible("#card-email"):
-            break 
-
-        # Check for Cloudflare
-        title = sb.get_title()
-        if "Just a moment" in title or sb.is_element_visible('iframe[src*="cloudflare"]'):
-            log(f"⚠️ Cloudflare Detected (Attempt {i+1})...", "WARN")
-            
-            # --- DEBUG LOGGING ---
-            try:
-                # 1. Verify Visibility
-                is_frame = sb.is_element_visible('iframe[src*="cloudflare"]')
-                log(f"🔍 Debug: Iframe Visible? {is_frame}", "INFO")
-                
-                # 2. Dump HTML Snippet (To check for new Challenge types)
-                src = sb.get_page_source()
-                # Clean up newlines for cleaner log
-                snippet = src[:1000].replace("\n", " ").replace("\r", " ")
-                log(f"📄 HTML Dump: {snippet}...", "INFO")
-                
-                # 3. Take Screenshot (If volume mounted, user can check)
-                try:
-                    path = f"debug_data/cf_debug_{i}.png"
-                    sb.save_screenshot(path)
-                    log(f"📸 Screenshot saved: {path}", "INFO")
-                except: pass
-                
-            except Exception as e:
-                log(f"Debug Logger Error: {e}", "WARN")
-            # ---------------------
-
-            # Try to solve
-            try:
-                sb.uc_gui_click_captcha() 
-                log("🖱️ uc_gui_click_captcha() called.", "OK")
-            except Exception as e:
-                log(f"GUI Click Error: {e}", "WARN")
-                # Fallback: Center Click
-                sb.execute_script("document.elementFromPoint(window.innerWidth/2, window.innerHeight/2).click();")
+        # --- USER REQUESTED SEQUENCE ---
+        sb.activate_cdp_mode(config.LOGIN_URL)
+        sb.sleep(2)
         
-        time.sleep(3)
+        # Handle "sb.solve_captcha()" mapping to standard UC method
+        log("🛡️ Checking/Solving Captcha...", "INFO")
+        if hasattr(sb, "solve_captcha"):
+            sb.solve_captcha()
+        else:
+            try:
+                sb.uc_gui_click_captcha()
+            except Exception as e:
+                log(f"Captcha click ignored: {e}", "INFO")
+                
+        sb.sleep(2)
+        # -------------------------------
 
+    except Exception as e:
+        log(f"⚠️ Navigation/Captcha Error: {e}", "WARN")
+
+    # Check if we are already logged in after the sequence
+    if "portal" in sb.get_current_url() or "live" in sb.get_current_url():
+        log("✅ Already logged in!", "OK")
+        update_cookies_and_tokens(bot)
+        get_socket_io_creds(bot)
+        return True
+
+    # Check for Login Form
     if not sb.is_element_visible("#card-email"):
-        log(f"❌ Login form never appeared. URL: {sb.get_current_url()}", "ERROR")
-        return False
+        # Last ditch check for Cloudflare or bad load
+        log(f"❌ Login form not visible. URL: {sb.get_current_url()}", "WARN")
+        # Try one more wait
+        sb.sleep(2)
+        if not sb.is_element_visible("#card-email"):
+            return False
 
     log("⌨️ Entering Credentials...", "INFO")
     try:
