@@ -20,7 +20,7 @@ def update_cookies_and_tokens(bot):
         driver = getattr(bot, "driver", None) or sb.driver
         
         # --- 1. CAPTURE USER-AGENT (CRITICAL for API) ---
-        # We need this to make the API requests match the browser
+        # This fixes the "Add Number / Refresh" buttons not working
         if not getattr(state, "current_user_agent", None):
             try:
                 ua = driver.execute_script("return navigator.userAgent;")
@@ -92,7 +92,8 @@ def login_sequence(bot):
     
     # 1. Navigate
     try:
-        sb.activate_cdp_mode(config.LOGIN_URL) # Better than safe_get for anti-detect
+        # Use activate_cdp_mode if available for better stealth, else standard
+        sb.activate_cdp_mode(config.LOGIN_URL) 
     except:
         try:
             bot.safe_get(config.LOGIN_URL)
@@ -102,8 +103,8 @@ def login_sequence(bot):
     # 2. Loop to handle Cloudflare or Login Form
     log("⏳ Waiting for Login Page or Captcha...", "INFO")
     
-    for i in range(15): # Loop for ~45 seconds
-        # Check success first
+    for i in range(20): # Loop for ~60 seconds
+        # Check success first (if redirected already)
         if "portal" in sb.get_current_url() or "live" in sb.get_current_url():
             log("✅ Already logged in!", "OK")
             update_cookies_and_tokens(bot)
@@ -121,11 +122,11 @@ def login_sequence(bot):
             
             # --- THE FIX: Use SeleniumBase's native CAPTCHA clicker ---
             try:
+                # This specifically handles the "Verify you are human" checkbox
                 sb.uc_gui_click_captcha() 
                 log("🖱️ Triggered uc_gui_click_captcha()", "OK")
             except Exception as e:
-                log(f"GUI Click failed: {e}", "WARN")
-                # Fallback: Blind click center
+                # Fallback: Blind click center if specific method fails
                 sb.execute_script("document.elementFromPoint(window.innerWidth/2, window.innerHeight/2).click();")
         
         time.sleep(3)
@@ -143,8 +144,10 @@ def login_sequence(bot):
         
         # Click Login
         try:
+            # Try wrapper smart click
             bot.smart_click('button[type="submit"]')
         except:
+            # Fallback to JS click if smart click fails
             sb.execute_script("document.querySelector('button[type=\"submit\"]').click()")
             
     except Exception as e:
