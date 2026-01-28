@@ -25,7 +25,7 @@ bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
 # ===================== SETTINGS =====================
-PAGE_SIZE = 25  # Increased from 10 to 25 items per page
+PAGE_SIZE = 20  # Updated to 20 items per page
 
 # ===================== KEYBOARDS =====================
 
@@ -48,15 +48,33 @@ def get_cancel_kb():
     ])
 
 def get_pagination_kb(prefix: str, current_page: int, total_pages: int, extra_data: str = ""):
-    """Generates Previous/Next buttons for pagination"""
+    """
+    Generates Previous/Next buttons for pagination.
+    CRITICAL FIX: Data format must be 'prefix:extra_data:page' to match the handler.
+    """
     buttons = []
+    
+    # PREVIOUS BUTTON
     if current_page > 1:
-        buttons.append(InlineKeyboardButton(text="⬅️ Prev", callback_data=f"{prefix}:{current_page-1}:{extra_data}"))
+        # Fix: Put extra_data (Range Name) BEFORE the page number
+        buttons.append(InlineKeyboardButton(
+            text="⬅️ Prev", 
+            callback_data=f"{prefix}:{extra_data}:{current_page-1}"
+        ))
     
-    buttons.append(InlineKeyboardButton(text=f"{current_page}/{total_pages}", callback_data="noop"))
+    # INDICATOR
+    buttons.append(InlineKeyboardButton(
+        text=f"{current_page}/{total_pages}", 
+        callback_data="noop"
+    ))
     
+    # NEXT BUTTON
     if current_page < total_pages:
-        buttons.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"{prefix}:{current_page+1}:{extra_data}"))
+        # Fix: Put extra_data (Range Name) BEFORE the page number
+        buttons.append(InlineKeyboardButton(
+            text="Next ➡️", 
+            callback_data=f"{prefix}:{extra_data}:{current_page+1}"
+        ))
     
     # Bottom row
     back_btn = [InlineKeyboardButton(text="🔙 Back to Ranges", callback_data="back_to_ranges")]
@@ -81,16 +99,13 @@ async def cmd_menu(message: types.Message):
 # ===================== NUMBERS & RANGES HANDLERS =====================
 
 async def show_ranges(message_or_call, edit=False):
-    """
-    Fetches numbers and displays Ranges as Inline Buttons.
-    Used by '📋 Numbers' and '🔎 Choose Range'.
-    """
+    """Fetches numbers and displays Ranges as Inline Buttons."""
     if isinstance(message_or_call, types.Message):
         status_msg = await message_or_call.answer("🔄 Fetching numbers...")
     else:
         status_msg = message_or_call.message
 
-    # 1. Fetch Numbers via API
+    # 1. Fetch Numbers
     ok, msg = await api.fetch_numbers()
     
     if not ok:
@@ -100,7 +115,6 @@ async def show_ranges(message_or_call, edit=False):
         return
 
     # 2. Check Data
-    # Use 'numbers_data' which contains the full dicts {'number':..., 'id':...}
     if not hasattr(state, "numbers_data") or not state.numbers_data:
         text = "⚠️ No numbers found."
         if edit: await status_msg.edit_text(text, parse_mode="HTML")
@@ -138,6 +152,7 @@ async def back_to_ranges(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("view_rng:"))
 async def view_range_numbers(callback: types.CallbackQuery):
+    # Data Format: view_rng : RANGE_NAME : PAGE_NUMBER
     parts = callback.data.split(":")
     range_name = parts[1]
     page = int(parts[2])
@@ -147,7 +162,7 @@ async def view_range_numbers(callback: types.CallbackQuery):
         return
 
     # Pagination Logic
-    items = state.numbers_data[range_name] # List of dicts
+    items = state.numbers_data[range_name]
     total_items = len(items)
     total_pages = math.ceil(total_items / PAGE_SIZE)
     start_idx = (page - 1) * PAGE_SIZE
@@ -160,13 +175,13 @@ async def view_range_numbers(callback: types.CallbackQuery):
     text += f"Total: {total_items} numbers\n\n"
     
     for item in current_items:
-        # Get number and add +
+        # Ensure number has + prefix
         num = item['number']
         if not num.startswith("+"):
             num = f"+{num}"
-            
         text += f"• <code>{num}</code>\n"
         
+    # Generate Pagination Keyboard
     kb = get_pagination_kb("view_rng", page, total_pages, range_name)
     
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
@@ -174,7 +189,7 @@ async def view_range_numbers(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "noop")
 async def noop_handler(callback: types.CallbackQuery):
-    await callback.answer("Current Page")
+    await callback.answer(f"Page {callback.message.reply_markup.inline_keyboard[0][1].text}")
 
 # ===================== ADD NUMBER HANDLERS =====================
 
