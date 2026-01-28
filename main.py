@@ -24,8 +24,8 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
-# Constants
-PAGE_SIZE = 10  # Number of items per page
+# ===================== SETTINGS =====================
+PAGE_SIZE = 25  # Increased from 10 to 25 items per page
 
 # ===================== KEYBOARDS =====================
 
@@ -48,7 +48,7 @@ def get_cancel_kb():
     ])
 
 def get_pagination_kb(prefix: str, current_page: int, total_pages: int, extra_data: str = ""):
-    """Generates Previous/Next buttons"""
+    """Generates Previous/Next buttons for pagination"""
     buttons = []
     if current_page > 1:
         buttons.append(InlineKeyboardButton(text="⬅️ Prev", callback_data=f"{prefix}:{current_page-1}:{extra_data}"))
@@ -58,53 +58,62 @@ def get_pagination_kb(prefix: str, current_page: int, total_pages: int, extra_da
     if current_page < total_pages:
         buttons.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"{prefix}:{current_page+1}:{extra_data}"))
     
-    return InlineKeyboardMarkup(inline_keyboard=[buttons, [InlineKeyboardButton(text="🔙 Back", callback_data="back_to_ranges")]])
+    # Bottom row
+    back_btn = [InlineKeyboardButton(text="🔙 Back to Ranges", callback_data="back_to_ranges")]
+    return InlineKeyboardMarkup(inline_keyboard=[buttons, back_btn])
 
 # ===================== COMMAND HANDLERS =====================
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
-        "🤖 **IVASMS Bot Ready**\n"
+        "🤖 <b>IVASMS Bot Ready</b>\n"
         "Session monitored via Selenium.\n"
         "Use the menu below to manage numbers:",
         reply_markup=get_main_menu(),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 @dp.message(Command("menu"))
 async def cmd_menu(message: types.Message):
-    await message.answer("📂 **Main Menu**", reply_markup=get_main_menu(), parse_mode="Markdown")
+    await message.answer("📂 <b>Main Menu</b>", reply_markup=get_main_menu(), parse_mode="HTML")
 
 # ===================== NUMBERS & RANGES HANDLERS =====================
 
 async def show_ranges(message_or_call, edit=False):
-    """Fetches numbers and displays Ranges as Inline Buttons."""
+    """
+    Fetches numbers and displays Ranges as Inline Buttons.
+    Used by '📋 Numbers' and '🔎 Choose Range'.
+    """
     if isinstance(message_or_call, types.Message):
         status_msg = await message_or_call.answer("🔄 Fetching numbers...")
     else:
         status_msg = message_or_call.message
 
-    # 1. Fetch Numbers
+    # 1. Fetch Numbers via API
     ok, msg = await api.fetch_numbers()
     
     if not ok:
-        text = f"⚠️ **Error:** {msg}\n\nIf it's Cloudflare, it will auto-solve in the browser."
-        if edit: await status_msg.edit_text(text, parse_mode="Markdown")
-        else: await status_msg.edit_text(text, parse_mode="Markdown")
+        text = f"⚠️ <b>Error:</b> {msg}\n\nIf it's Cloudflare, it will auto-solve in the browser."
+        if edit: await status_msg.edit_text(text, parse_mode="HTML")
+        else: await status_msg.edit_text(text, parse_mode="HTML")
         return
 
     # 2. Check Data
-    if not state.numbers_ids_by_group:
-        await status_msg.edit_text("⚠️ No numbers found.", parse_mode="Markdown")
+    # Use 'numbers_data' which contains the full dicts {'number':..., 'id':...}
+    if not hasattr(state, "numbers_data") or not state.numbers_data:
+        text = "⚠️ No numbers found."
+        if edit: await status_msg.edit_text(text, parse_mode="HTML")
+        else: await status_msg.edit_text(text, parse_mode="HTML")
         return
 
     # 3. Build Inline Buttons for Ranges
     buttons = []
     row = []
-    for rng in sorted(state.numbers_ids_by_group.keys()):
-        count = len(state.numbers_ids_by_group[rng])
+    for rng in sorted(state.numbers_data.keys()):
+        count = len(state.numbers_data[rng])
         btn_text = f"{rng} ({count})"
+        # Callback: view_rng : RANGE_NAME : PAGE_NUMBER
         row.append(InlineKeyboardButton(text=btn_text, callback_data=f"view_rng:{rng}:1"))
         if len(row) == 2:
             buttons.append(row)
@@ -112,11 +121,11 @@ async def show_ranges(message_or_call, edit=False):
     if row: buttons.append(row)
 
     # 4. Send/Edit Message
-    text = "🔎 **Select a Range** to view numbers:"
+    text = "🔎 <b>Select a Range</b> to view numbers:"
     if edit:
-        await status_msg.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
+        await status_msg.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
     else:
-        await status_msg.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
+        await status_msg.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
 
 @dp.message(F.text.in_({"📋 Numbers", "🔎 Choose Range"}))
 async def handle_numbers_btn(message: types.Message):
@@ -129,31 +138,38 @@ async def back_to_ranges(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("view_rng:"))
 async def view_range_numbers(callback: types.CallbackQuery):
-    _, range_name, page_str = callback.data.split(":")
-    page = int(page_str)
+    parts = callback.data.split(":")
+    range_name = parts[1]
+    page = int(parts[2])
     
-    if range_name not in state.numbers_ids_by_group:
+    if not hasattr(state, "numbers_data") or range_name not in state.numbers_data:
         await callback.answer("Range not found (refresh needed).")
         return
 
     # Pagination Logic
-    ids = state.numbers_ids_by_group[range_name]
-    total_items = len(ids)
+    items = state.numbers_data[range_name] # List of dicts
+    total_items = len(items)
     total_pages = math.ceil(total_items / PAGE_SIZE)
     start_idx = (page - 1) * PAGE_SIZE
     end_idx = start_idx + PAGE_SIZE
     
-    current_items = ids[start_idx:end_idx]
+    current_items = items[start_idx:end_idx]
     
     # Render List
-    text = f"📂 **Range:** {range_name} (Page {page}/{total_pages})\n\n"
-    for num_id in current_items:
-        # Note: API might only give IDs initially. If we fix API, we can show phone numbers here.
-        text += f"• `{num_id}`\n"
+    text = f"📂 <b>Range:</b> {range_name} (Page {page}/{total_pages})\n"
+    text += f"Total: {total_items} numbers\n\n"
+    
+    for item in current_items:
+        # Get number and add +
+        num = item['number']
+        if not num.startswith("+"):
+            num = f"+{num}"
+            
+        text += f"• <code>{num}</code>\n"
         
     kb = get_pagination_kb("view_rng", page, total_pages, range_name)
     
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 @dp.callback_query(F.data == "noop")
@@ -166,9 +182,9 @@ async def noop_handler(callback: types.CallbackQuery):
 async def ask_add_number(message: types.Message):
     state.add_number_pending[message.chat.id] = True
     await message.answer(
-        "➕ **Send the Termination ID** to add (e.g. `980693`):",
+        "➕ <b>Send the Termination ID</b> to add (e.g. <code>980693</code>):",
         reply_markup=get_cancel_kb(),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 # ===================== REMOVE NUMBER HANDLERS =====================
@@ -182,22 +198,22 @@ async def ask_remove_range(message: types.Message):
         await status_msg.edit_text(f"⚠️ Error: {msg}")
         return
 
-    if not state.numbers_ids_by_group:
+    if not hasattr(state, "numbers_data") or not state.numbers_data:
         await status_msg.edit_text("⚠️ No numbers to remove.")
         return
 
     # Build Buttons
     buttons = []
-    for rng in sorted(state.numbers_ids_by_group.keys()):
-        count = len(state.numbers_ids_by_group[rng])
+    for rng in sorted(state.numbers_data.keys()):
+        count = len(state.numbers_data[rng])
         buttons.append([InlineKeyboardButton(text=f"🗑 {rng} ({count})", callback_data=f"ask_rm:{rng}")])
     
     buttons.append([InlineKeyboardButton(text="❌ Cancel", callback_data="cancel_action")])
     
     await status_msg.edit_text(
-        "🗑 **Select a Range to WIPE** all numbers from:",
+        "🗑 <b>Select a Range to WIPE</b> all numbers from:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 @dp.callback_query(F.data.startswith("ask_rm:"))
@@ -205,15 +221,15 @@ async def confirm_remove(callback: types.CallbackQuery):
     range_name = callback.data.split(":")[1]
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ YES, DELETE", callback_data=f"do_rm:{range_name}")],
+        [InlineKeyboardButton(text="✅ YES, DELETE ALL", callback_data=f"do_rm:{range_name}")],
         [InlineKeyboardButton(text="❌ No, Cancel", callback_data="cancel_action")]
     ])
     
     await callback.message.edit_text(
-        f"⚠️ **CONFIRM DELETION** ⚠️\n\n"
-        f"Are you sure you want to remove ALL numbers in range **{range_name}**?",
+        f"⚠️ <b>CONFIRM DELETION</b> ⚠️\n\n"
+        f"Are you sure you want to remove ALL numbers in range <b>{range_name}</b>?",
         reply_markup=kb,
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
     await callback.answer()
 
@@ -225,9 +241,9 @@ async def execute_remove(callback: types.CallbackQuery):
     ok, msg = await api.remove_range(range_name)
     
     if ok:
-        await callback.message.edit_text(f"✅ **Success:** {msg}", parse_mode="Markdown")
+        await callback.message.edit_text(f"✅ <b>Success:</b> {msg}", parse_mode="HTML")
     else:
-        await callback.message.edit_text(f"❌ **Failed:** {msg}", parse_mode="Markdown")
+        await callback.message.edit_text(f"❌ <b>Failed:</b> {msg}", parse_mode="HTML")
     await callback.answer()
 
 @dp.callback_query(F.data == "cancel_action")
@@ -240,43 +256,49 @@ async def cancel_handler(callback: types.CallbackQuery):
 
 @dp.message(F.text)
 async def handle_text(message: types.Message):
-    # Handle Add Number Input
+    # 1. Handle Add Number Input
     if state.add_number_pending.get(message.chat.id):
         term_id = message.text.strip()
+        
         if not term_id.isdigit():
-            await message.answer("⚠️ Invalid ID. Please send numbers only (e.g. `123456`).")
+            await message.answer("⚠️ Invalid ID. Please send numbers only (e.g. <code>123456</code>).", parse_mode="HTML")
             return
             
-        status_msg = await message.answer(f"⏳ Adding **{term_id}**...", parse_mode="Markdown")
+        status_msg = await message.answer(f"⏳ Adding <b>{term_id}</b>...", parse_mode="HTML")
+        
         ok, msg = await api.add_number(term_id)
         state.add_number_pending.pop(message.chat.id, None)
         
         if ok:
-            await status_msg.edit_text(f"✅ {msg}", parse_mode="Markdown")
+            await status_msg.edit_text(f"✅ {msg}", parse_mode="HTML")
         else:
-            await status_msg.edit_text(f"❌ {msg}", parse_mode="Markdown")
+            await status_msg.edit_text(f"❌ {msg}", parse_mode="HTML")
         return
 
-    # Handle Status/History
+    # 2. Handle Status
     if message.text == "📊 Status":
         connected = "✅ YES" if state.current_livesms_token else "❌ NO"
-        ua_stat = "✅ Captured" if state.current_user_agent else "⚠️ Missing"
+        ua_stat = "✅ Captured" if state.current_user_agent else "⚠️ Missing (Wait for browser)"
+        
         msg = (
-            f"📊 **Bot Status**\n"
+            f"📊 <b>Bot Status</b>\n"
             f"• WebSocket: {connected}\n"
             f"• Browser UA: {ua_stat}\n"
-            f"• OTPs Received: {state.otp_stats['total']}"
+            f"• OTPs Received: {state.otp_stats['total']}\n"
         )
-        await message.answer(msg, parse_mode="Markdown")
+        await message.answer(msg, parse_mode="HTML")
         
+    # 3. Handle History
     elif message.text == "📜 History":
         if not state.otp_history:
             await message.answer("📜 No OTPs yet.")
         else:
-            txt = "📜 **Recent OTPs:**\n\n"
+            txt = "📜 <b>Recent OTPs:</b>\n\n"
             for otp in state.otp_history[-5:]:
-                txt += f"• `{otp.get('otp_code')}` from `{otp.get('originator')}`\n"
-            await message.answer(txt, parse_mode="Markdown")
+                code = otp.get('otp_code', '-')
+                sender = otp.get('originator', 'Unknown')
+                txt += f"• <code>{code}</code> from <code>{sender}</code>\n"
+            await message.answer(txt, parse_mode="HTML")
 
 # ===================== STARTUP =====================
 
@@ -293,7 +315,6 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    # Ensure state exists (if running standalone for test)
     if not hasattr(state, "add_number_pending"):
         state.add_number_pending = {}
         
