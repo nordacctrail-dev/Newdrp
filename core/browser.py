@@ -20,9 +20,7 @@ def update_cookies_and_tokens(bot):
         
         # --- SMART JS COOKIE FETCH ---
         try:
-            # Execute JS to get cookies without crashing driver
             cookie_str = sb.execute_script("return document.cookie;")
-            
             if cookie_str:
                 simple_cookies = {}
                 for pair in cookie_str.split(";"):
@@ -52,18 +50,40 @@ def update_cookies_and_tokens(bot):
             raise e
 
 def get_socket_io_creds(bot):
-    """Extracts JS variables for WebSocket auth."""
+    """Extracts JS variables for WebSocket auth (Matches t3s.py logic)."""
     try:
         sb = bot.sb if hasattr(bot, 'sb') else bot
         html = sb.get_page_source()
-        token_match = re.search(r"token['\"]?\s*:\s*['\"]([^'\"<>]+)['\"]", html)
-        user_match = re.search(r"user['\"]?\s*:\s*['\"]([^'\"<>]+)['\"]", html)
-        if token_match and user_match:
-            state.current_livesms_token = token_match.group(1)
-            state.current_livesms_user = user_match.group(1)
+        
+        token = None
+        user = None
+
+        # 1. Primary Regex (from t3s.py - looks for io.connect call)
+        pattern = (
+            r"io\.connect\('https://ivasms\.com:2087/livesms',\s*\{\s*query\s*:\s*\{\s*"
+            r"token:\s*'([^']+)'[^}]*user:\"([^\"}]+)\""
+        )
+        m = re.search(pattern, html, re.DOTALL)
+        if m:
+            token = m.group(1).strip()
+            user  = m.group(2).strip()
+
+        # 2. Fallback Regex (Loose search)
+        if not (token and user):
+            m_token = re.search(r"token['\"]?\s*:\s*['\"]([^'\"<>]+)['\"]", html)
+            m_user  = re.search(r"user['\"]?\s*:\s*['\"]([^'\"<>]+)['\"]",  html)
+            if m_token and m_user:
+                token = token or m_token.group(1).strip()
+                user  = user  or m_user.group(1).strip()
+        
+        if token and user:
+            state.current_livesms_token = token
+            state.current_livesms_user = user
+            log(f"🔑 Credentials Found: User={user}, Token={token[:10]}...", "OK")
             return True
-    except:
-        pass
+            
+    except Exception as e:
+        log(f"Creds Extraction Error: {e}", "WARN")
     return False
 
 def login_sequence(bot):
@@ -87,7 +107,6 @@ def login_sequence(bot):
 
     log("⏳ Waiting for credentials fields...", "INFO")
     try:
-        # Wait up to 20s for the element, but proceed instantly when found
         sb.wait_for_element("#card-email", timeout=20)
     except:
         log("❌ Login form not found.", "ERROR")
@@ -108,8 +127,7 @@ def login_sequence(bot):
 
     log("⏳ Waiting for Redirect (Max 30s)...", "INFO")
     
-    # --- SMART WAIT FOR REDIRECT ---
-    # We loop quickly to check URL change instead of sleeping 15s
+    # Smart Wait for Redirect
     start_time = time.time()
     logged_in = False
     
@@ -118,12 +136,10 @@ def login_sequence(bot):
         if "portal" in url or "live" in url:
             logged_in = True
             break
-        # Fast 1s poll
         time.sleep(1)
 
     if logged_in:
         log("✅ Login Successful!", "OK")
-        
         # Capture cookies IMMEDIATELY
         update_cookies_and_tokens(bot)
         get_socket_io_creds(bot)
@@ -162,14 +178,12 @@ def browser_thread_target():
                 log("🕵️ Browser entering monitoring loop...", "INFO")
                 
                 while not state.shutdown_event.is_set():
-                    # Poll every 10s for token updates
                     time.sleep(10)
                     update_cookies_and_tokens(bot)
 
                     if not state.current_livesms_token:
                         if hasattr(bot, 'safe_get'): bot.safe_get(config.LIVE_SMS_URL)
                         else: sb.open(config.LIVE_SMS_URL)
-                        # Give it a moment to render JS
                         time.sleep(3) 
                         get_socket_io_creds(bot)
                     
