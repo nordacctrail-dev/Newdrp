@@ -14,18 +14,25 @@ from sb_stealth_wrapper.strategies.input import HumanInputStrategy
 os.environ["HEADLESS"] = "0"
 
 def update_cookies_and_tokens(bot):
-    """Snapshot cookies and CSRF token to RAM."""
+    """Snapshot cookies, tokens, AND User-Agent to RAM."""
     try:
         sb = bot.sb if hasattr(bot, 'sb') else bot
         driver = getattr(bot, "driver", None) or sb.driver
         
-        # --- METHOD 3: CDP (Chrome DevTools Protocol) ---
-        # This bypasses the standard 'get_cookies' lock that causes crashes
-        # and successfully retrieves HttpOnly cookies that JS cannot see.
+        # --- 1. CAPTURE USER-AGENT (CRITICAL) ---
         try:
-            # Enable Network domain just in case
-            # driver.execute_cdp_cmd('Network.enable', {}) # Usually not needed but good safety
-            
+            ua = driver.execute_script("return navigator.userAgent;")
+            if ua:
+                state.current_user_agent = ua
+                # Log it once so we know what we are working with
+                if not hasattr(update_cookies_and_tokens, "ua_logged"):
+                    log(f"🕵️ Captured User-Agent: {ua[:30]}...", "INFO")
+                    update_cookies_and_tokens.ua_logged = True
+        except Exception as e:
+            log(f"UA Fetch Failed: {e}", "WARN")
+
+        # --- 2. CAPTURE COOKIES (CDP METHOD) ---
+        try:
             cookie_data = driver.execute_cdp_cmd('Network.getCookies', {})
             all_cookies = cookie_data.get('cookies', [])
             
@@ -41,15 +48,8 @@ def update_cookies_and_tokens(bot):
             
             if simple_cookies:
                 state.current_cookies = simple_cookies
-                # Also grab the User-Agent to ensure WebSocket matches exactly
-                try:
-                    ua = driver.execute_script("return navigator.userAgent;")
-                    state.current_user_agent = ua
-                except:
-                    pass
-
                 if not hasattr(update_cookies_and_tokens, "logged"):
-                    log(f"🍪 Cookies (CDP): {len(simple_cookies)} found [{', '.join(cookie_names[:3])}...]", "INFO")
+                    log(f"🍪 Cookies Synced ({len(simple_cookies)}): {', '.join(cookie_names[:3])}...", "INFO")
                     update_cookies_and_tokens.logged = True
             else:
                 log("⚠️ CDP returned 0 cookies.", "WARN")
@@ -57,7 +57,7 @@ def update_cookies_and_tokens(bot):
         except Exception as e:
             log(f"CDP Cookie Fetch Failed: {e}", "ERROR")
 
-        # Get CSRF Token
+        # --- 3. GET CSRF TOKEN ---
         try:
             csrf = sb.get_attribute('meta[name="csrf-token"]', "content")
             if csrf:
@@ -79,7 +79,7 @@ def get_socket_io_creds(bot):
         token = None
         user = None
 
-        # 1. Primary Regex
+        # Regex 1: io.connect call
         pattern = (
             r"io\.connect\('https://ivasms\.com:2087/livesms',\s*\{\s*query\s*:\s*\{\s*"
             r"token:\s*'([^']+)'[^}]*user:\"([^\"}]+)\""
@@ -89,7 +89,7 @@ def get_socket_io_creds(bot):
             token = m.group(1).strip()
             user  = m.group(2).strip()
 
-        # 2. Fallback Regex
+        # Regex 2: Fallback
         if not (token and user):
             m_token = re.search(r"token['\"]?\s*:\s*['\"]([^'\"<>]+)['\"]", html)
             m_user  = re.search(r"user['\"]?\s*:\s*['\"]([^'\"<>]+)['\"]",  html)
