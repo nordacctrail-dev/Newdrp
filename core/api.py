@@ -40,6 +40,8 @@ async def add_number(term_id: str):
                     return True, "✅ Number Added Successfully"
                 elif resp.status == 403:
                     return False, "⛔ 403 Forbidden (UA/Cookie Mismatch)"
+                elif resp.status == 419:
+                    return False, "⛔ 419 Page Expired (CSRF Token Invalid)"
                 else:
                     return False, f"⚠️ Error {resp.status}: {text[:100]}"
     except Exception as e:
@@ -48,71 +50,91 @@ async def add_number(term_id: str):
 async def fetch_numbers():
     """
     Refreshes the list of numbers.
-    Now extracts BOTH the actual 'Number' and the 'number_id'.
+    NOW LOOPS to fetch ALL numbers (Server-Side Pagination), not just the first 50.
     """
     url = config.NUMBERS_BASE_URL
     headers, cookies = await get_headers_and_cookies()
     
-    params = {
-        "draw": "1",
-        "start": "0",
-        "length": str(config.NUMBERS_PAGE_SIZE),
-        "search[value]": ""
-    }
-
+    # Fetch in chunks of 100 for speed
+    BATCH_SIZE = 100 
+    start = 0
+    all_rows = []
+    
     try:
         async with aiohttp.ClientSession(cookies=cookies) as session:
-            async with session.get(url, headers=headers, params=params) as resp:
-                if resp.status != 200:
-                    return False, f"HTTP {resp.status} (Possible Cloudflare Block)"
-
-                data = await resp.json()
-                rows = data.get("data", [])
+            while True:
+                params = {
+                    "draw": "1",
+                    "start": str(start),
+                    "length": str(BATCH_SIZE),
+                    "search[value]": ""
+                }
                 
-                groups = {}
-                
-                for row in rows:
-                    # 1. Get the actual phone number string
-                    phone_number = row.get("Number")
-                    if not phone_number: continue
-                    phone_number = str(phone_number).strip()
+                async with session.get(url, headers=headers, params=params) as resp:
+                    if resp.status != 200:
+                        return False, f"HTTP {resp.status} (Possible Cloudflare Block)"
 
-                    # 2. Get the Range Name
-                    rng = row.get("range", "Unknown")
+                    data = await resp.json()
+                    rows = data.get("data", [])
+                    total_records = int(data.get("recordsTotal", 0) or data.get("recordsFiltered", 0))
                     
-                    # 3. Extract the ID (hidden in HTML value="123")
-                    # T3S logic: re.search(r'value="(\d+)"', num_id_html)
-                    num_id_html = row.get("number_id", "")
-                    num_id_match = re.search(r'value="(\d+)"', num_id_html)
+                    if not rows:
+                        break
+                        
+                    all_rows.extend(rows)
                     
-                    if num_id_match:
-                        num_id = num_id_match.group(1)
+                    # Stop if we fetched everything
+                    if len(all_rows) >= total_records:
+                        break
                         
-                        if rng not in groups: 
-                            groups[rng] = []
+                    # Stop if server returned fewer items than requested (last page)
+                    if len(rows) < BATCH_SIZE:
+                        break
                         
-                        # STORE BOTH: Number for display, ID for deletion
-                        groups[rng].append({
-                            "number": phone_number,
-                            "id": num_id
-                        })
+                    # Next Page
+                    start += BATCH_SIZE
+                    
+            # --- PROCESS ALL ROWS ---
+            groups = {}
+            for row in all_rows:
+                # 1. Get Phone Number
+                phone_number = row.get("Number")
+                if not phone_number: continue
+                phone_number = str(phone_number).strip()
 
-                # Update State with the rich data
-                state.numbers_data = groups 
-                state.numbers_last_update = __import__("time").time()
+                # 2. Get Range Name
+                rng = row.get("range", "Unknown")
                 
-                total = sum(len(items) for items in groups.values())
-                return True, f"Fetched {total} numbers in {len(groups)} ranges."
+                # 3. Extract ID
+                num_id_html = row.get("number_id", "")
+                num_id_match = re.search(r'value="(\d+)"', num_id_html)
+                
+                if num_id_match:
+                    num_id = num_id_match.group(1)
+                    
+                    if rng not in groups: 
+                        groups[rng] = []
+                    
+                    groups[rng].append({
+                        "number": phone_number,
+                        "id": num_id
+                    })
+
+            state.numbers_data = groups 
+            state.numbers_last_update = __import__("time").time()
+            
+            total = sum(len(items) for items in groups.values())
+            return True, f"Fetched {total} numbers in {len(groups)} ranges."
+
     except Exception as e:
         return False, str(e)
 
 async def remove_range(range_name: str):
     """Removes all numbers in a specific range."""
-    # Check if we have data for this range
     if not hasattr(state, "numbers_data") or range_name not in state.numbers_data:
         return False, "❌ Range not found. Please refresh numbers first."
 
-    # Extract just the IDs for the API call
+    # Extract IDs
     items = state.numbers_data[range_name]
     ids = [item['id'] for item in items]
     
@@ -122,18 +144,29 @@ async def remove_range(range_name: str):
     url = config.REMOVE_NUMBER_URL
     headers, cookies = await get_headers_and_cookies()
     
-    data = aiohttp.FormData()
-    data.add_field("_token", state.current_csrf_token)
-    for num_id in ids:
-        data.add_field("NumberID[]", num_id)
-
+    # Send chunks if too many numbers to avoid 413 Payload Too Large
+    CHUNK_SIZE = 500
+    total_removed = 0
+    
     try:
         async with aiohttp.ClientSession(cookies=cookies) as session:
-            async with session.post(url, headers=headers, data=data) as resp:
-                text = await resp.text()
-                if resp.status == 200:
-                    return True, f"✅ Removed {len(ids)} numbers from {range_name}"
-                else:
-                    return False, f"❌ Failed (HTTP {resp.status}): {text[:50]}"
+            # Loop through chunks
+            for i in range(0, len(ids), CHUNK_SIZE):
+                chunk_ids = ids[i:i + CHUNK_SIZE]
+                
+                data = aiohttp.FormData()
+                data.add_field("_token", state.current_csrf_token)
+                for num_id in chunk_ids:
+                    data.add_field("NumberID[]", num_id)
+
+                async with session.post(url, headers=headers, data=data) as resp:
+                    text = await resp.text()
+                    if resp.status == 200:
+                        total_removed += len(chunk_ids)
+                    else:
+                        return False, f"❌ Failed (HTTP {resp.status}) on chunk {i}: {text[:50]}"
+            
+            return True, f"✅ Removed {total_removed} numbers from {range_name}"
+
     except Exception as e:
         return False, str(e)

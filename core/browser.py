@@ -13,14 +13,18 @@ from sb_stealth_wrapper.strategies.input import HumanInputStrategy
 # 1. Force Headed Mode Env Vars
 os.environ["HEADLESS"] = "0"
 
+# Ensure debug directory exists
+if not os.path.exists("debug_data"):
+    try:
+        os.makedirs("debug_data")
+    except: pass
+
 def update_cookies_and_tokens(bot):
     """Snapshot cookies, tokens, AND User-Agent to RAM."""
     try:
         sb = bot.sb if hasattr(bot, 'sb') else bot
         driver = getattr(bot, "driver", None) or sb.driver
         
-        # --- 1. CAPTURE USER-AGENT (CRITICAL for API) ---
-        # This fixes the "Add Number / Refresh" buttons "Nothing works" issue
         if not getattr(state, "current_user_agent", None):
             try:
                 ua = driver.execute_script("return navigator.userAgent;")
@@ -29,7 +33,6 @@ def update_cookies_and_tokens(bot):
                     log(f"🕵️ Captured User-Agent: {ua[:30]}...", "INFO")
             except: pass
 
-        # --- 2. CAPTURE COOKIES (CDP Method) ---
         try:
             cookie_data = driver.execute_cdp_cmd('Network.getCookies', {})
             all_cookies = cookie_data.get('cookies', [])
@@ -42,7 +45,6 @@ def update_cookies_and_tokens(bot):
                     update_cookies_and_tokens.logged = True
         except: pass
 
-        # --- 3. GET CSRF TOKEN ---
         try:
             csrf = sb.get_attribute('meta[name="csrf-token"]', "content")
             if csrf:
@@ -82,19 +84,19 @@ def get_socket_io_creds(bot):
     return False
 
 def login_sequence(bot):
-    """Performs login using safe_get + gui_click_captcha."""
+    """Performs login with DETAILED DEBUGGING for Cloudflare loops."""
     sb = bot.sb if hasattr(bot, 'sb') else bot
     
     log(f"🌐 Navigating to {config.LOGIN_URL}...", "INFO")
     
-    # 1. Use safe_get (Restored as requested)
-    # This handles the initial page load and basic Cloudflare checks internally
     try:
-        bot.safe_get(config.LOGIN_URL)
-    except Exception as e:
-        log(f"safe_get warning: {e}", "WARN")
+        sb.activate_cdp_mode(config.LOGIN_URL) 
+    except:
+        try:
+            bot.safe_get(config.LOGIN_URL)
+        except Exception as e:
+            log(f"Navigation error: {e}", "WARN")
 
-    # 2. Robust Loop for Cloudflare or Login Form
     log("⏳ Waiting for Login Page or Captcha...", "INFO")
     
     for i in range(20): 
@@ -107,26 +109,50 @@ def login_sequence(bot):
 
         # Check for Login Form
         if sb.is_element_visible("#card-email"):
-            break # Form found!
+            break 
 
-        # Check for Cloudflare (Fallback if safe_get missed it)
+        # Check for Cloudflare
         title = sb.get_title()
         if "Just a moment" in title or sb.is_element_visible('iframe[src*="cloudflare"]'):
-            log(f"🤖 Cloudflare Detected (Attempt {i+1})...", "WARN")
+            log(f"⚠️ Cloudflare Detected (Attempt {i+1})...", "WARN")
+            
+            # --- DEBUG LOGGING ---
             try:
-                # SeleniumBase native solver
-                sb.uc_gui_click_captcha() 
-                log("🖱️ Triggered uc_gui_click_captcha()", "OK")
+                # 1. Verify Visibility
+                is_frame = sb.is_element_visible('iframe[src*="cloudflare"]')
+                log(f"🔍 Debug: Iframe Visible? {is_frame}", "INFO")
+                
+                # 2. Dump HTML Snippet (To check for new Challenge types)
+                src = sb.get_page_source()
+                # Clean up newlines for cleaner log
+                snippet = src[:1000].replace("\n", " ").replace("\r", " ")
+                log(f"📄 HTML Dump: {snippet}...", "INFO")
+                
+                # 3. Take Screenshot (If volume mounted, user can check)
+                try:
+                    path = f"debug_data/cf_debug_{i}.png"
+                    sb.save_screenshot(path)
+                    log(f"📸 Screenshot saved: {path}", "INFO")
+                except: pass
+                
             except Exception as e:
-                # Fallback: Blind center click
+                log(f"Debug Logger Error: {e}", "WARN")
+            # ---------------------
+
+            # Try to solve
+            try:
+                sb.uc_gui_click_captcha() 
+                log("🖱️ uc_gui_click_captcha() called.", "OK")
+            except Exception as e:
+                log(f"GUI Click Error: {e}", "WARN")
+                # Fallback: Center Click
                 sb.execute_script("document.elementFromPoint(window.innerWidth/2, window.innerHeight/2).click();")
         
         time.sleep(3)
 
-    # 3. Enter Credentials
     if not sb.is_element_visible("#card-email"):
         log(f"❌ Login form never appeared. URL: {sb.get_current_url()}", "ERROR")
-        return False 
+        return False
 
     log("⌨️ Entering Credentials...", "INFO")
     try:
@@ -145,7 +171,6 @@ def login_sequence(bot):
 
     log("⏳ Waiting for Redirect...", "INFO")
     
-    # 4. Wait for Dashboard
     for _ in range(30):
         if "portal" in sb.get_current_url() or "live" in sb.get_current_url():
             log("✅ Login Successful!", "OK")
