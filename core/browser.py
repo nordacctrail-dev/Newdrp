@@ -19,11 +19,15 @@ def update_cookies_and_tokens(bot):
         sb = bot.sb if hasattr(bot, 'sb') else bot
         driver = getattr(bot, "driver", None) or sb.driver
         
-        # --- METHOD 2: NATIVE DRIVER COOKIES (Can see HttpOnly) ---
+        # --- METHOD 3: CDP (Chrome DevTools Protocol) ---
+        # This bypasses the standard 'get_cookies' lock that causes crashes
+        # and successfully retrieves HttpOnly cookies that JS cannot see.
         try:
-            # We use the native driver method because JS cannot see HttpOnly cookies
-            # (which are usually the important ones for auth)
-            all_cookies = driver.get_cookies()
+            # Enable Network domain just in case
+            # driver.execute_cdp_cmd('Network.enable', {}) # Usually not needed but good safety
+            
+            cookie_data = driver.execute_cdp_cmd('Network.getCookies', {})
+            all_cookies = cookie_data.get('cookies', [])
             
             simple_cookies = {}
             cookie_names = []
@@ -37,15 +41,21 @@ def update_cookies_and_tokens(bot):
             
             if simple_cookies:
                 state.current_cookies = simple_cookies
-                # Log the names so we know what we got
+                # Also grab the User-Agent to ensure WebSocket matches exactly
+                try:
+                    ua = driver.execute_script("return navigator.userAgent;")
+                    state.current_user_agent = ua
+                except:
+                    pass
+
                 if not hasattr(update_cookies_and_tokens, "logged"):
-                    log(f"🍪 Cookies Synced ({len(simple_cookies)}): {', '.join(cookie_names)}", "INFO")
+                    log(f"🍪 Cookies (CDP): {len(simple_cookies)} found [{', '.join(cookie_names[:3])}...]", "INFO")
                     update_cookies_and_tokens.logged = True
             else:
-                log("⚠️ Driver returned 0 cookies.", "WARN")
+                log("⚠️ CDP returned 0 cookies.", "WARN")
 
         except Exception as e:
-            log(f"Native Cookie Fetch Failed: {e}", "ERROR")
+            log(f"CDP Cookie Fetch Failed: {e}", "ERROR")
 
         # Get CSRF Token
         try:
@@ -57,7 +67,6 @@ def update_cookies_and_tokens(bot):
             
     except Exception as e:
         log(f"Token Sync Warning: {e}", "WARN")
-        # Only raise if it's a fatal driver disconnect
         if "connectable" in str(e) or "refused" in str(e) or "process is dead" in str(e):
             raise e
 
@@ -70,7 +79,7 @@ def get_socket_io_creds(bot):
         token = None
         user = None
 
-        # 1. Primary Regex (io.connect call)
+        # 1. Primary Regex
         pattern = (
             r"io\.connect\('https://ivasms\.com:2087/livesms',\s*\{\s*query\s*:\s*\{\s*"
             r"token:\s*'([^']+)'[^}]*user:\"([^\"}]+)\""
@@ -80,7 +89,7 @@ def get_socket_io_creds(bot):
             token = m.group(1).strip()
             user  = m.group(2).strip()
 
-        # 2. Fallback Regex (Loose search)
+        # 2. Fallback Regex
         if not (token and user):
             m_token = re.search(r"token['\"]?\s*:\s*['\"]([^'\"<>]+)['\"]", html)
             m_user  = re.search(r"user['\"]?\s*:\s*['\"]([^'\"<>]+)['\"]",  html)
@@ -91,7 +100,6 @@ def get_socket_io_creds(bot):
         if token and user:
             state.current_livesms_token = token
             state.current_livesms_user = user
-            # Only log once per unique token to avoid spam
             if getattr(get_socket_io_creds, "last_token", None) != token:
                 log(f"🔑 Credentials Found: User={user}, Token={token[:10]}...", "OK")
                 get_socket_io_creds.last_token = token
@@ -113,7 +121,6 @@ def login_sequence(bot):
         log(f"Safe Navigation failed: {e}", "ERROR")
         return False
 
-    # Check if we are already logged in
     if "portal" in sb.get_current_url() or "live" in sb.get_current_url():
         log("✅ Already logged in (Session active)", "OK")
         update_cookies_and_tokens(bot)
@@ -142,7 +149,6 @@ def login_sequence(bot):
 
     log("⏳ Waiting for Redirect (Max 30s)...", "INFO")
     
-    # Smart Wait for Redirect
     start_time = time.time()
     logged_in = False
     
