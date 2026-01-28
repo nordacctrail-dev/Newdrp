@@ -20,7 +20,7 @@ def update_cookies_and_tokens(bot):
         driver = getattr(bot, "driver", None) or sb.driver
         
         # --- 1. CAPTURE USER-AGENT (CRITICAL for API) ---
-        # This fixes the "Add Number / Refresh" buttons not working
+        # This fixes the "Add Number / Refresh" buttons "Nothing works" issue
         if not getattr(state, "current_user_agent", None):
             try:
                 ua = driver.execute_script("return navigator.userAgent;")
@@ -51,7 +51,6 @@ def update_cookies_and_tokens(bot):
             
     except Exception as e:
         log(f"Token Sync Warning: {e}", "WARN")
-        # Only crash if driver is truly dead
         if "connectable" in str(e) or "refused" in str(e) or "process is dead" in str(e):
             raise e
 
@@ -62,12 +61,10 @@ def get_socket_io_creds(bot):
         html = sb.get_page_source()
         token, user = None, None
 
-        # Regex 1
         m = re.search(r"io\.connect\('https://ivasms\.com:2087/livesms',\s*\{\s*query\s*:\s*\{\s*token:\s*'([^']+)'[^}]*user:\"([^\"}]+)\"", html, re.DOTALL)
         if m:
             token, user = m.group(1).strip(), m.group(2).strip()
 
-        # Regex 2 (Fallback)
         if not (token and user):
             m_t = re.search(r"token['\"]?\s*:\s*['\"]([^'\"<>]+)['\"]", html)
             m_u = re.search(r"user['\"]?\s*:\s*['\"]([^'\"<>]+)['\"]", html)
@@ -85,26 +82,23 @@ def get_socket_io_creds(bot):
     return False
 
 def login_sequence(bot):
-    """Performs login using uc_gui_click_captcha for Cloudflare."""
+    """Performs login using safe_get + gui_click_captcha."""
     sb = bot.sb if hasattr(bot, 'sb') else bot
     
     log(f"🌐 Navigating to {config.LOGIN_URL}...", "INFO")
     
-    # 1. Navigate
+    # 1. Use safe_get (Restored as requested)
+    # This handles the initial page load and basic Cloudflare checks internally
     try:
-        # Use activate_cdp_mode if available for better stealth, else standard
-        sb.activate_cdp_mode(config.LOGIN_URL) 
-    except:
-        try:
-            bot.safe_get(config.LOGIN_URL)
-        except Exception as e:
-            log(f"Navigation error: {e}", "WARN")
+        bot.safe_get(config.LOGIN_URL)
+    except Exception as e:
+        log(f"safe_get warning: {e}", "WARN")
 
-    # 2. Loop to handle Cloudflare or Login Form
+    # 2. Robust Loop for Cloudflare or Login Form
     log("⏳ Waiting for Login Page or Captcha...", "INFO")
     
-    for i in range(20): # Loop for ~60 seconds
-        # Check success first (if redirected already)
+    for i in range(20): 
+        # Check success first
         if "portal" in sb.get_current_url() or "live" in sb.get_current_url():
             log("✅ Already logged in!", "OK")
             update_cookies_and_tokens(bot)
@@ -113,28 +107,26 @@ def login_sequence(bot):
 
         # Check for Login Form
         if sb.is_element_visible("#card-email"):
-            break # Form found! Exit loop and type.
+            break # Form found!
 
-        # Check for Cloudflare
+        # Check for Cloudflare (Fallback if safe_get missed it)
         title = sb.get_title()
         if "Just a moment" in title or sb.is_element_visible('iframe[src*="cloudflare"]'):
             log(f"🤖 Cloudflare Detected (Attempt {i+1})...", "WARN")
-            
-            # --- THE FIX: Use SeleniumBase's native CAPTCHA clicker ---
             try:
-                # This specifically handles the "Verify you are human" checkbox
+                # SeleniumBase native solver
                 sb.uc_gui_click_captcha() 
                 log("🖱️ Triggered uc_gui_click_captcha()", "OK")
             except Exception as e:
-                # Fallback: Blind click center if specific method fails
+                # Fallback: Blind center click
                 sb.execute_script("document.elementFromPoint(window.innerWidth/2, window.innerHeight/2).click();")
         
         time.sleep(3)
 
-    # 3. Enter Credentials (only if form exists)
+    # 3. Enter Credentials
     if not sb.is_element_visible("#card-email"):
         log(f"❌ Login form never appeared. URL: {sb.get_current_url()}", "ERROR")
-        return False # Triggers browser restart
+        return False 
 
     log("⌨️ Entering Credentials...", "INFO")
     try:
@@ -142,12 +134,9 @@ def login_sequence(bot):
         sb.type("#card-password", config.IVASMS_PASSWORD)
         time.sleep(1)
         
-        # Click Login
         try:
-            # Try wrapper smart click
             bot.smart_click('button[type="submit"]')
         except:
-            # Fallback to JS click if smart click fails
             sb.execute_script("document.querySelector('button[type=\"submit\"]').click()")
             
     except Exception as e:
@@ -177,7 +166,6 @@ def browser_thread_target():
         try:
             log("🚀 Launching Browser Session...", "INFO")
             
-            # headless=False is REQUIRED for uc_gui_click_captcha to work
             with StealthBot(headless=False, input_strategy=my_input) as bot:
                 state.driver_ref = bot
                 sb = bot.sb if hasattr(bot, 'sb') else bot
