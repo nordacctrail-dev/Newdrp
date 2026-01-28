@@ -5,21 +5,27 @@ from utils import log
 
 async def get_headers_and_cookies():
     """
-    Constructs headers and cookies for API requests using current state.
+    Constructs headers and cookies using the LIVE browser state.
+    CRITICAL: Must use the browser's User-Agent to match the cookies.
     """
     cookies = state.current_cookies.copy()
     headers = config.NUMBERS_HEADERS.copy()
     
-    # Add CSRF token if available
+    # 1. OVERRIDE USER-AGENT (The Fix)
+    # Use the one captured by core/browser.py
+    if getattr(state, "current_user_agent", None):
+        headers["User-Agent"] = state.current_user_agent
+    else:
+        log("⚠️ API using hardcoded UA (Browser UA not captured yet).", "WARN")
+
+    # 2. Add CSRF Token
     if state.current_csrf_token:
         headers["X-CSRF-TOKEN"] = state.current_csrf_token
         
     return headers, cookies
 
 async def add_number(term_id: str):
-    """
-    Adds a number by Termination ID.
-    """
+    """Adds a number by Termination ID."""
     if not state.current_csrf_token:
         return False, "❌ Missing CSRF Token (Browser still loading?)"
 
@@ -35,16 +41,14 @@ async def add_number(term_id: str):
                 if resp.status == 200:
                     return True, "✅ Number Added Successfully"
                 elif resp.status == 403:
-                    return False, "⛔ 403 Forbidden (Cloudflare or Session Invalid)"
+                    return False, "⛔ 403 Forbidden (UA/Cookie Mismatch or Cloudflare)"
                 else:
                     return False, f"⚠️ Error {resp.status}: {text[:100]}"
     except Exception as e:
         return False, f"💥 Request Failed: {str(e)}"
 
 async def fetch_numbers():
-    """
-    Refreshes the list of numbers from the portal.
-    """
+    """Refreshes the list of numbers."""
     url = config.NUMBERS_BASE_URL
     headers, cookies = await get_headers_and_cookies()
     params = {
@@ -58,17 +62,15 @@ async def fetch_numbers():
         async with aiohttp.ClientSession(cookies=cookies) as session:
             async with session.get(url, headers=headers, params=params) as resp:
                 if resp.status != 200:
-                    return False, f"HTTP {resp.status}"
+                    return False, f"HTTP {resp.status} (Possible Cloudflare Block)"
 
                 data = await resp.json()
                 rows = data.get("data", [])
                 
-                # Parse numbers
                 groups = {}
+                import re
                 for row in rows:
                     rng = row.get("range", "Unknown")
-                    # Extract ID from HTML (e.g. value="123")
-                    import re
                     num_id_match = re.search(r'value="(\d+)"', row.get("number_id", ""))
                     if num_id_match:
                         num_id = num_id_match.group(1)
@@ -82,11 +84,9 @@ async def fetch_numbers():
         return False, str(e)
 
 async def remove_range(range_name: str):
-    """
-    Removes all numbers in a specific range.
-    """
+    """Removes all numbers in a specific range."""
     if range_name not in state.numbers_ids_by_group:
-        return False, "❌ Range not found in cache. Refresh numbers first."
+        return False, "❌ Range not found. Refresh numbers first."
 
     ids = state.numbers_ids_by_group[range_name]
     if not ids:
@@ -95,7 +95,6 @@ async def remove_range(range_name: str):
     url = config.REMOVE_NUMBER_URL
     headers, cookies = await get_headers_and_cookies()
     
-    # Prepare form data
     data = aiohttp.FormData()
     data.add_field("_token", state.current_csrf_token)
     for num_id in ids:
