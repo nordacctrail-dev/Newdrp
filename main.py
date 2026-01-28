@@ -50,16 +50,18 @@ def get_cancel_kb():
 def get_pagination_kb(prefix: str, current_page: int, total_pages: int, extra_data: str = ""):
     """
     Generates Previous/Next buttons for pagination.
-    CRITICAL FIX: Data format must be 'prefix:extra_data:page' to match the handler.
+    Data format: 'prefix:extra_data:page'
     """
     buttons = []
     
     # PREVIOUS BUTTON
     if current_page > 1:
-        # Fix: Put extra_data (Range Name) BEFORE the page number
+        # Extra data (like Range Name) goes BEFORE the page number
+        # If extra_data is empty (for 'All Numbers'), we still need the colon separator or handle it
+        data_str = f"{prefix}:{extra_data}:{current_page-1}" if extra_data else f"{prefix}:{current_page-1}"
         buttons.append(InlineKeyboardButton(
             text="⬅️ Prev", 
-            callback_data=f"{prefix}:{extra_data}:{current_page-1}"
+            callback_data=data_str
         ))
     
     # INDICATOR
@@ -70,15 +72,20 @@ def get_pagination_kb(prefix: str, current_page: int, total_pages: int, extra_da
     
     # NEXT BUTTON
     if current_page < total_pages:
-        # Fix: Put extra_data (Range Name) BEFORE the page number
+        data_str = f"{prefix}:{extra_data}:{current_page+1}" if extra_data else f"{prefix}:{current_page+1}"
         buttons.append(InlineKeyboardButton(
             text="Next ➡️", 
-            callback_data=f"{prefix}:{extra_data}:{current_page+1}"
+            callback_data=data_str
         ))
     
     # Bottom row
-    back_btn = [InlineKeyboardButton(text="🔙 Back to Ranges", callback_data="back_to_ranges")]
-    return InlineKeyboardMarkup(inline_keyboard=[buttons, back_btn])
+    # If we are in "view_rng" mode, back goes to ranges. If "view_all", maybe back to menu or just refresh.
+    if prefix == "view_rng":
+        back_btn = [InlineKeyboardButton(text="🔙 Back to Ranges", callback_data="back_to_ranges")]
+        return InlineKeyboardMarkup(inline_keyboard=[buttons, back_btn])
+    else:
+        # For "All Numbers", just return the pagination row
+        return InlineKeyboardMarkup(inline_keyboard=[buttons])
 
 # ===================== COMMAND HANDLERS =====================
 
@@ -96,7 +103,103 @@ async def cmd_start(message: types.Message):
 async def cmd_menu(message: types.Message):
     await message.answer("📂 <b>Main Menu</b>", reply_markup=get_main_menu(), parse_mode="HTML")
 
-# ===================== NUMBERS & RANGES HANDLERS =====================
+# ===================== ALL NUMBERS HANDLER (📋 Numbers) =====================
+
+async def show_all_numbers(message_or_call, page=1, edit=False):
+    """Fetches and displays ALL numbers from ALL ranges in a single list."""
+    if isinstance(message_or_call, types.Message):
+        status_msg = await message_or_call.answer("🔄 Fetching all numbers...")
+    else:
+        status_msg = message_or_call.message
+
+    # 1. Fetch Numbers (refresh data)
+    # We only fetch if it's the first page/request or if forced. 
+    # For pagination clicks (edit=True), we might skip fetch if we trust state, 
+    # but safe to fetch to be accurate.
+    if not edit: 
+        ok, msg = await api.fetch_numbers()
+        if not ok:
+            text = f"⚠️ <b>Error:</b> {msg}"
+            if edit: await status_msg.edit_text(text, parse_mode="HTML")
+            else: await status_msg.edit_text(text, parse_mode="HTML")
+            return
+
+    # 2. Check Data
+    if not hasattr(state, "numbers_data") or not state.numbers_data:
+        text = "⚠️ No numbers found."
+        if edit: await status_msg.edit_text(text, parse_mode="HTML")
+        else: await status_msg.edit_text(text, parse_mode="HTML")
+        return
+
+    # 3. Flatten All Numbers
+    all_items = []
+    for rng_name, items in state.numbers_data.items():
+        for item in items:
+            # Attach range name for display
+            item_copy = item.copy()
+            item_copy['range_name'] = rng_name
+            all_items.append(item_copy)
+            
+    # Sort by Range then Number, or just Number
+    # all_items.sort(key=lambda x: x['number']) 
+
+    # 4. Pagination Logic
+    total_items = len(all_items)
+    total_pages = math.ceil(total_items / PAGE_SIZE)
+    if total_pages == 0: total_pages = 1
+    
+    if page > total_pages: page = total_pages
+    
+    start_idx = (page - 1) * PAGE_SIZE
+    end_idx = start_idx + PAGE_SIZE
+    
+    current_items = all_items[start_idx:end_idx]
+    
+    # 5. Render List
+    text = f"📋 <b>All Numbers</b> (Page {page}/{total_pages})\n"
+    text += f"Total: {total_items} numbers\n\n"
+    
+    for item in current_items:
+        num = item['number']
+        if not num.startswith("+"): num = f"+{num}"
+        # Format: +123456 (RangeName)
+        text += f"• <code>{num}</code> ({item['range_name']})\n"
+
+    # 6. Generate Keyboard (Prefix: view_all)
+    # No extra_data needed for all view
+    kb = get_pagination_kb("view_all", page, total_pages, extra_data="")
+
+    if edit:
+        await status_msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await status_msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+@dp.message(F.text == "📋 Numbers")
+async def handle_all_numbers_btn(message: types.Message):
+    await show_all_numbers(message, page=1, edit=False)
+
+@dp.callback_query(F.data.startswith("view_all:"))
+async def view_all_numbers(callback: types.CallbackQuery):
+    # Data Format: view_all : PAGE_NUMBER
+    # Note: get_pagination_kb with empty extra_data might produce "view_all::2" or "view_all:2" 
+    # Let's handle splitting carefully.
+    
+    parts = callback.data.split(":")
+    # parts[0] is "view_all"
+    # If extra_data was empty in get_pagination_kb, it might be:
+    # "view_all:PAGE" -> len 2
+    # or "view_all::PAGE" -> len 3
+    
+    if len(parts) == 3:
+        page = int(parts[2])
+    else:
+        page = int(parts[1])
+
+    await show_all_numbers(callback, page=page, edit=True)
+    await callback.answer()
+
+
+# ===================== RANGES HANDLER (🔎 Choose Range) =====================
 
 async def show_ranges(message_or_call, edit=False):
     """Fetches numbers and displays Ranges as Inline Buttons."""
@@ -106,13 +209,13 @@ async def show_ranges(message_or_call, edit=False):
         status_msg = message_or_call.message
 
     # 1. Fetch Numbers
-    ok, msg = await api.fetch_numbers()
-    
-    if not ok:
-        text = f"⚠️ <b>Error:</b> {msg}\n\nIf it's Cloudflare, it will auto-solve in the browser."
-        if edit: await status_msg.edit_text(text, parse_mode="HTML")
-        else: await status_msg.edit_text(text, parse_mode="HTML")
-        return
+    if not edit:
+        ok, msg = await api.fetch_numbers()
+        if not ok:
+            text = f"⚠️ <b>Error:</b> {msg}\n\nIf it's Cloudflare, it will auto-solve in the browser."
+            if edit: await status_msg.edit_text(text, parse_mode="HTML")
+            else: await status_msg.edit_text(text, parse_mode="HTML")
+            return
 
     # 2. Check Data
     if not hasattr(state, "numbers_data") or not state.numbers_data:
@@ -141,8 +244,8 @@ async def show_ranges(message_or_call, edit=False):
     else:
         await status_msg.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
 
-@dp.message(F.text.in_({"📋 Numbers", "🔎 Choose Range"}))
-async def handle_numbers_btn(message: types.Message):
+@dp.message(F.text == "🔎 Choose Range")
+async def handle_ranges_btn(message: types.Message):
     await show_ranges(message, edit=False)
 
 @dp.callback_query(F.data == "back_to_ranges")
@@ -165,6 +268,8 @@ async def view_range_numbers(callback: types.CallbackQuery):
     items = state.numbers_data[range_name]
     total_items = len(items)
     total_pages = math.ceil(total_items / PAGE_SIZE)
+    if total_pages == 0: total_pages = 1
+    
     start_idx = (page - 1) * PAGE_SIZE
     end_idx = start_idx + PAGE_SIZE
     
