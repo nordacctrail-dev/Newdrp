@@ -194,12 +194,12 @@ async def show_ranges(message_or_call, edit=False):
         else: await status_msg.edit_text(text, parse_mode="HTML")
         return
 
-    # --- MODIFIED: Single Column Layout ---
+    # --- SINGLE COLUMN LAYOUT ---
     buttons = []
     for rng in sorted(state.numbers_data.keys()):
         count = len(state.numbers_data[rng])
         btn_text = f"{rng} ({count})"
-        # Directly append a list containing ONE button to make it a single column
+        # Direct append for single column
         buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"view_rng:{rng}:1")])
 
     text = "🔎 <b>Select a Range</b> to view numbers:"

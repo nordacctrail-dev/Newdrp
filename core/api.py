@@ -23,6 +23,135 @@ async def get_headers_and_cookies():
         
     return headers, cookies
 
+async def fetch_numbers():
+    """
+    Refreshes the list of numbers.
+    Includes RETRY logic for Cloudflare 403s.
+    """
+    url = config.NUMBERS_BASE_URL
+    
+    # Retry loop (Try once, if 403, wait for browser, then try again)
+    for attempt in range(2):
+        headers, cookies = await get_headers_and_cookies()
+        
+        BATCH_SIZE = 50  # Match t3s.py (safe size)
+        start = 0
+        draw = 1
+        all_rows = []
+        is_403 = False
+        
+        log(f"🔄 Fetching numbers (Attempt {attempt+1})...", "INFO")
+        
+        try:
+            async with aiohttp.ClientSession(cookies=cookies) as session:
+                while True:
+                    # Exact params to mimic DataTables behavior
+                    params = {
+                        "draw": str(draw),
+                        "columns[0][data]": "number_id",
+                        "columns[0][name]": "id",
+                        "columns[0][orderable]": "false",
+                        "columns[1][data]": "Number",
+                        "columns[2][data]": "range",
+                        "columns[3][data]": "A2P",
+                        "columns[13][data]": "action",
+                        "order[0][column]": "1",
+                        "order[0][dir]": "desc",
+                        "start": str(start),
+                        "length": str(BATCH_SIZE),
+                        "search[value]": ""
+                    }
+                    
+                    async with session.get(url, headers=headers, params=params) as resp:
+                        # --- CLOUDFLARE DETECTION & RECOVERY ---
+                        if resp.status == 403 or resp.status == 503:
+                            if attempt == 0:
+                                log("⚠️ API hit 403/503 - Triggering Browser Refresh...", "WARN")
+                                state.force_refresh_cookies = True
+                                
+                                # Wait for browser to do its job (up to 20s)
+                                for _ in range(10):
+                                    if not state.force_refresh_cookies:
+                                        log("✅ Browser finished refresh. Retrying API...", "OK")
+                                        break
+                                    await asyncio.sleep(2)
+                                
+                                is_403 = True
+                                break # Break inner while loop to restart outer attempt loop
+                            else:
+                                return False, "❌ Cloudflare Loop (Browser failed to solve)"
+
+                        if resp.status != 200:
+                            return False, f"HTTP {resp.status} (Possible Cloudflare Block)"
+
+                        data = await resp.json()
+                        rows = data.get("data", [])
+                        
+                        # Determine Total Records
+                        total_records = data.get("recordsTotal") or data.get("recordsFiltered") or 0
+                        try:
+                            total_records = int(total_records)
+                        except:
+                            total_records = 0
+                        
+                        if not rows:
+                            break
+                            
+                        all_rows.extend(rows)
+                        
+                        # Stop if we fetched everything
+                        if len(all_rows) >= total_records:
+                            break
+                            
+                        # Stop if server returned fewer items than requested (last page)
+                        if len(rows) < BATCH_SIZE:
+                            break
+                            
+                        # Next Page
+                        start += BATCH_SIZE
+                        draw += 1
+                        await asyncio.sleep(0.2) 
+                
+                if is_403:
+                    continue # Restart the attempt loop
+
+                # --- PROCESS ALL ROWS ---
+                groups = {}
+                for row in all_rows:
+                    # 1. Get Phone Number
+                    phone_number = row.get("Number")
+                    if not phone_number: continue
+                    phone_number = str(phone_number).strip()
+
+                    # 2. Get Range Name
+                    rng = row.get("range", "Unknown")
+                    
+                    # 3. Extract ID
+                    num_id_html = row.get("number_id", "")
+                    num_id_match = re.search(r'value="(\d+)"', num_id_html)
+                    
+                    if num_id_match:
+                        num_id = num_id_match.group(1)
+                        
+                        if rng not in groups: 
+                            groups[rng] = []
+                        
+                        groups[rng].append({
+                            "number": phone_number,
+                            "id": num_id
+                        })
+
+                state.numbers_data = groups 
+                state.numbers_last_update = time.time()
+                
+                total = sum(len(items) for items in groups.values())
+                return True, f"Fetched {total} numbers in {len(groups)} ranges."
+
+        except Exception as e:
+            return False, str(e)
+            
+    return False, "Failed after retries"
+
 async def add_number(term_id: str):
     """Adds a number by Termination ID."""
     if not state.current_csrf_token:
@@ -39,117 +168,14 @@ async def add_number(term_id: str):
                 
                 if resp.status == 200:
                     return True, "✅ Number Added Successfully"
-                elif resp.status == 403:
-                    return False, "⛔ 403 Forbidden (UA/Cookie Mismatch)"
-                elif resp.status == 419:
-                    return False, "⛔ 419 Page Expired (CSRF Token Invalid)"
+                elif resp.status in [403, 419]:
+                    # Trigger refresh for next time, but fail this request
+                    state.force_refresh_cookies = True
+                    return False, "⛔ 403/419 - Session Expired (Browser refreshing... try again)"
                 else:
                     return False, f"⚠️ Error {resp.status}: {text[:100]}"
     except Exception as e:
         return False, f"💥 Request Failed: {str(e)}"
-
-async def fetch_numbers():
-    """
-    Refreshes the list of numbers.
-    LOOPS correctly to fetch ALL pages using strict DataTables params.
-    """
-    url = config.NUMBERS_BASE_URL
-    headers, cookies = await get_headers_and_cookies()
-    
-    BATCH_SIZE = 50  # Match t3s.py (safe size)
-    start = 0
-    draw = 1
-    all_rows = []
-    
-    log("🔄 Starting bulk fetch of numbers...", "INFO")
-    
-    try:
-        async with aiohttp.ClientSession(cookies=cookies) as session:
-            while True:
-                # Exact params from t3s.py to ensure server behaves correctly
-                params = {
-                    "draw": str(draw),
-                    "columns[0][data]": "number_id",
-                    "columns[0][name]": "id",
-                    "columns[0][orderable]": "false",
-                    "columns[1][data]": "Number",
-                    "columns[2][data]": "range",
-                    "columns[3][data]": "A2P",
-                    "columns[13][data]": "action",
-                    "order[0][column]": "1",
-                    "order[0][dir]": "desc",
-                    "start": str(start),
-                    "length": str(BATCH_SIZE),
-                    "search[value]": ""
-                }
-                
-                async with session.get(url, headers=headers, params=params) as resp:
-                    if resp.status != 200:
-                        return False, f"HTTP {resp.status} (Possible Cloudflare Block)"
-
-                    data = await resp.json()
-                    rows = data.get("data", [])
-                    
-                    # Determine Total Records (Handles 'recordsTotal' or 'recordsFiltered')
-                    total_records = data.get("recordsTotal") or data.get("recordsFiltered") or 0
-                    try:
-                        total_records = int(total_records)
-                    except:
-                        total_records = 0
-                    
-                    if not rows:
-                        break
-                        
-                    all_rows.extend(rows)
-                    log(f"   Fetched {len(rows)} rows (Total: {len(all_rows)}/{total_records})", "INFO")
-                    
-                    # Stop if we fetched everything
-                    if len(all_rows) >= total_records:
-                        break
-                        
-                    # Stop if server returned fewer items than requested (last page)
-                    if len(rows) < BATCH_SIZE:
-                        break
-                        
-                    # Next Page
-                    start += BATCH_SIZE
-                    draw += 1
-                    await asyncio.sleep(0.2) # Slight delay to be polite
-                    
-            # --- PROCESS ALL ROWS ---
-            groups = {}
-            for row in all_rows:
-                # 1. Get Phone Number
-                phone_number = row.get("Number")
-                if not phone_number: continue
-                phone_number = str(phone_number).strip()
-
-                # 2. Get Range Name
-                rng = row.get("range", "Unknown")
-                
-                # 3. Extract ID
-                num_id_html = row.get("number_id", "")
-                num_id_match = re.search(r'value="(\d+)"', num_id_html)
-                
-                if num_id_match:
-                    num_id = num_id_match.group(1)
-                    
-                    if rng not in groups: 
-                        groups[rng] = []
-                    
-                    groups[rng].append({
-                        "number": phone_number,
-                        "id": num_id
-                    })
-
-            state.numbers_data = groups 
-            state.numbers_last_update = time.time()
-            
-            total = sum(len(items) for items in groups.values())
-            return True, f"Fetched {total} numbers in {len(groups)} ranges."
-
-    except Exception as e:
-        return False, str(e)
 
 async def remove_range(range_name: str):
     """Removes all numbers in a specific range."""

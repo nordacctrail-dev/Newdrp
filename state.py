@@ -8,6 +8,10 @@ shutdown_event = asyncio.Event()
 # Selenium Driver Reference (accessed by multiple threads/tasks)
 driver_ref = None
 
+# SIGNAL: Tells the browser thread to go solve Cloudflare ASAP
+# This is the key fix for the "Looping 403" issue.
+force_refresh_cookies = False  
+
 # ===================== DATA STORE =====================
 
 # Cookies & Tokens (Stored in RAM only)
@@ -38,12 +42,12 @@ otp_stats = {
 # Numbers Cache
 # Format: { 'RANGE_NAME': ['id1', 'id2'], ... }
 numbers_ids_by_group = {} 
+numbers_data = {}  # Stores full number details
 numbers_last_update = 0.0
 
 # ===================== ALERTS & STATUS =====================
 
 # Status of various monitoring subsystems
-# Values: "ACTIVE", "RESOLVED", "FAILED", or None
 alert_state = {
     "cloudflare": None,
     "session": None,
@@ -51,3 +55,4 @@ alert_state = {
 
 # Track if we have already run the Cloudflare auto-solver to prevent loops
 cf_solver_ran = False
+add_number_pending = {} # Tracks user states for adding numbers

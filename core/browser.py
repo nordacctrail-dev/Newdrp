@@ -53,8 +53,6 @@ def update_cookies_and_tokens(bot):
             
     except Exception as e:
         log(f"Token Sync Warning: {e}", "WARN")
-        if "connectable" in str(e) or "refused" in str(e) or "process is dead" in str(e):
-            raise e
 
 def get_socket_io_creds(bot):
     """Extracts JS variables for WebSocket auth."""
@@ -66,62 +64,68 @@ def get_socket_io_creds(bot):
         m = re.search(r"io\.connect\('https://ivasms\.com:2087/livesms',\s*\{\s*query\s*:\s*\{\s*token:\s*'([^']+)'[^}]*user:\"([^\"}]+)\"", html, re.DOTALL)
         if m:
             token, user = m.group(1).strip(), m.group(2).strip()
-
-        if not (token and user):
-            m_t = re.search(r"token['\"]?\s*:\s*['\"]([^'\"<>]+)['\"]", html)
-            m_u = re.search(r"user['\"]?\s*:\s*['\"]([^'\"<>]+)['\"]", html)
-            if m_t and m_u:
-                token, user = m_t.group(1).strip(), m_u.group(1).strip()
         
         if token and user:
             state.current_livesms_token = token
             state.current_livesms_user = user
-            if getattr(get_socket_io_creds, "last_token", None) != token:
-                log(f"🔑 Credentials Found: User={user}", "OK")
-                get_socket_io_creds.last_token = token
             return True
     except: pass
     return False
 
-def login_sequence(bot):
-    """Performs login using specific CDP Mode sequence."""
+def check_and_solve_cloudflare(bot, url=None):
+    """Checks for Cloudflare and solves it if present."""
     sb = bot.sb if hasattr(bot, 'sb') else bot
     
-    log(f"🌐 Navigating to {config.LOGIN_URL} via CDP Mode...", "INFO")
-    
-    try:
-        # --- USER REQUESTED SEQUENCE ---
-        sb.activate_cdp_mode(config.LOGIN_URL)
+    if url:
+        try:
+            sb.activate_cdp_mode(url)
+            sb.sleep(2)
+        except: pass
+
+    # Detection
+    title = sb.get_title()
+    if "Just a moment" in title or sb.is_element_visible('iframe[src*="cloudflare"]'):
+        log("🛡️ Cloudflare Detected - Solving...", "WARN")
+        
+        # 1. Try UC Click
+        try:
+            if hasattr(sb, "uc_gui_click_captcha"):
+                sb.uc_gui_click_captcha()
+        except: pass
+        
         sb.sleep(2)
         
-        # Handle "sb.solve_captcha()" mapping to standard UC method
-        log("🛡️ Checking/Solving Captcha...", "INFO")
-        if hasattr(sb, "solve_captcha"):
-            sb.solve_captcha()
-        else:
+        # 2. Try Generic Solve
+        if "Just a moment" in sb.get_title():
             try:
-                sb.uc_gui_click_captcha()
-            except Exception as e:
-                log(f"Captcha click ignored: {e}", "INFO")
-                
+                if hasattr(sb, "solve_captcha"):
+                    sb.solve_captcha()
+            except: pass
+
+        # 3. Try Center Click
+        if "Just a moment" in sb.get_title():
+            try:
+                 sb.execute_script("document.elementFromPoint(window.innerWidth/2, window.innerHeight/2).click();")
+            except: pass
+        
         sb.sleep(2)
-        # -------------------------------
+        return True
+    return False
 
-    except Exception as e:
-        log(f"⚠️ Navigation/Captcha Error: {e}", "WARN")
+def login_sequence(bot):
+    """Performs login with robust solving."""
+    sb = bot.sb if hasattr(bot, 'sb') else bot
+    
+    log(f"🌐 Navigating to {config.LOGIN_URL}...", "INFO")
+    check_and_solve_cloudflare(bot, config.LOGIN_URL)
 
-    # Check if we are already logged in after the sequence
     if "portal" in sb.get_current_url() or "live" in sb.get_current_url():
         log("✅ Already logged in!", "OK")
         update_cookies_and_tokens(bot)
         get_socket_io_creds(bot)
         return True
 
-    # Check for Login Form
     if not sb.is_element_visible("#card-email"):
-        # Last ditch check for Cloudflare or bad load
-        log(f"❌ Login form not visible. URL: {sb.get_current_url()}", "WARN")
-        # Try one more wait
         sb.sleep(2)
         if not sb.is_element_visible("#card-email"):
             return False
@@ -131,18 +135,12 @@ def login_sequence(bot):
         sb.type("#card-email", config.IVASMS_EMAIL)
         sb.type("#card-password", config.IVASMS_PASSWORD)
         time.sleep(1)
-        
-        try:
-            bot.smart_click('button[type="submit"]')
-        except:
-            sb.execute_script("document.querySelector('button[type=\"submit\"]').click()")
-            
+        sb.execute_script("document.querySelector('button[type=\"submit\"]').click()")
     except Exception as e:
         log(f"Typing failed: {e}", "ERROR")
         return False
 
     log("⏳ Waiting for Redirect...", "INFO")
-    
     for _ in range(30):
         if "portal" in sb.get_current_url() or "live" in sb.get_current_url():
             log("✅ Login Successful!", "OK")
@@ -151,8 +149,6 @@ def login_sequence(bot):
             get_socket_io_creds(bot)
             return True
         time.sleep(1)
-
-    log(f"❌ Login Timeout. URL: {sb.get_current_url()}", "ERROR")
     return False
 
 def browser_thread_target():
@@ -171,27 +167,34 @@ def browser_thread_target():
                 
                 if not login_sequence(bot):
                     send_sync_message("❌ <b>Bot Login Failed - Retrying...</b>")
-                    log("🔄 Login failed. Restarting...", "WARN")
                     time.sleep(5)
                     continue 
 
                 send_sync_message("✅ <b>Bot Logged In</b>")
-                log("🕵️ Browser entering monitoring loop...", "INFO")
                 
                 while not state.shutdown_event.is_set():
-                    time.sleep(10)
+                    time.sleep(5)
                     update_cookies_and_tokens(bot)
 
+                    # --- CRITICAL FIX: WATCH FOR SIGNAL FROM API ---
+                    if state.force_refresh_cookies:
+                        log("🚨 API reported 403 - Browser taking over to solve...", "WARN")
+                        # 1. Go to the page that failed
+                        check_and_solve_cloudflare(bot, config.NUMBERS_BASE_URL)
+                        # 2. Sync new tokens
+                        update_cookies_and_tokens(bot)
+                        # 3. Reset flag so API can retry
+                        state.force_refresh_cookies = False
+                        log("✅ Browser refreshed cookies. API should resume.", "OK")
+                    # -----------------------------------------------
+
                     if not state.current_livesms_token:
-                        if hasattr(bot, 'safe_get'): bot.safe_get(config.LIVE_SMS_URL)
-                        else: sb.open(config.LIVE_SMS_URL)
+                        sb.open(config.LIVE_SMS_URL)
                         time.sleep(3) 
                         get_socket_io_creds(bot)
                     
                     if "login" in sb.get_current_url():
-                        log("⚠️ Session Lost - Re-logging...", "WARN")
-                        if not login_sequence(bot):
-                            break 
+                        if not login_sequence(bot): break 
 
         except Exception as e:
             log(f"💥 Browser Crashed: {e}", "ERROR")
