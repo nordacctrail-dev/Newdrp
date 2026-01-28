@@ -33,7 +33,7 @@ def get_main_menu():
     """Persistent Bottom Menu (Hybrid UI)"""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📋 Numbers"), KeyboardButton(text="🔎 Choose Range")],
+            [KeyboardButton(text="📋 All Numbers"), KeyboardButton(text="🔎 Choose Range")],
             [KeyboardButton(text="➕ Add Number"), KeyboardButton(text="🗑 Remove Numbers")],
             [KeyboardButton(text="📊 Status"), KeyboardButton(text="📜 History")]
         ],
@@ -56,8 +56,6 @@ def get_pagination_kb(prefix: str, current_page: int, total_pages: int, extra_da
     
     # PREVIOUS BUTTON
     if current_page > 1:
-        # Extra data (like Range Name) goes BEFORE the page number
-        # If extra_data is empty (for 'All Numbers'), we still need the colon separator or handle it
         data_str = f"{prefix}:{extra_data}:{current_page-1}" if extra_data else f"{prefix}:{current_page-1}"
         buttons.append(InlineKeyboardButton(
             text="⬅️ Prev", 
@@ -79,12 +77,10 @@ def get_pagination_kb(prefix: str, current_page: int, total_pages: int, extra_da
         ))
     
     # Bottom row
-    # If we are in "view_rng" mode, back goes to ranges. If "view_all", maybe back to menu or just refresh.
     if prefix == "view_rng":
         back_btn = [InlineKeyboardButton(text="🔙 Back to Ranges", callback_data="back_to_ranges")]
         return InlineKeyboardMarkup(inline_keyboard=[buttons, back_btn])
     else:
-        # For "All Numbers", just return the pagination row
         return InlineKeyboardMarkup(inline_keyboard=[buttons])
 
 # ===================== COMMAND HANDLERS =====================
@@ -103,7 +99,7 @@ async def cmd_start(message: types.Message):
 async def cmd_menu(message: types.Message):
     await message.answer("📂 <b>Main Menu</b>", reply_markup=get_main_menu(), parse_mode="HTML")
 
-# ===================== ALL NUMBERS HANDLER (📋 Numbers) =====================
+# ===================== ALL NUMBERS HANDLER (📋 All Numbers) =====================
 
 async def show_all_numbers(message_or_call, page=1, edit=False):
     """Fetches and displays ALL numbers from ALL ranges in a single list."""
@@ -112,10 +108,6 @@ async def show_all_numbers(message_or_call, page=1, edit=False):
     else:
         status_msg = message_or_call.message
 
-    # 1. Fetch Numbers (refresh data)
-    # We only fetch if it's the first page/request or if forced. 
-    # For pagination clicks (edit=True), we might skip fetch if we trust state, 
-    # but safe to fetch to be accurate.
     if not edit: 
         ok, msg = await api.fetch_numbers()
         if not ok:
@@ -124,26 +116,19 @@ async def show_all_numbers(message_or_call, page=1, edit=False):
             else: await status_msg.edit_text(text, parse_mode="HTML")
             return
 
-    # 2. Check Data
     if not hasattr(state, "numbers_data") or not state.numbers_data:
         text = "⚠️ No numbers found."
         if edit: await status_msg.edit_text(text, parse_mode="HTML")
         else: await status_msg.edit_text(text, parse_mode="HTML")
         return
 
-    # 3. Flatten All Numbers
     all_items = []
     for rng_name, items in state.numbers_data.items():
         for item in items:
-            # Attach range name for display
             item_copy = item.copy()
             item_copy['range_name'] = rng_name
             all_items.append(item_copy)
             
-    # Sort by Range then Number, or just Number
-    # all_items.sort(key=lambda x: x['number']) 
-
-    # 4. Pagination Logic
     total_items = len(all_items)
     total_pages = math.ceil(total_items / PAGE_SIZE)
     if total_pages == 0: total_pages = 1
@@ -155,18 +140,14 @@ async def show_all_numbers(message_or_call, page=1, edit=False):
     
     current_items = all_items[start_idx:end_idx]
     
-    # 5. Render List
     text = f"📋 <b>All Numbers</b> (Page {page}/{total_pages})\n"
     text += f"Total: {total_items} numbers\n\n"
     
     for item in current_items:
         num = item['number']
         if not num.startswith("+"): num = f"+{num}"
-        # Format: +123456 (RangeName)
         text += f"• <code>{num}</code> ({item['range_name']})\n"
 
-    # 6. Generate Keyboard (Prefix: view_all)
-    # No extra_data needed for all view
     kb = get_pagination_kb("view_all", page, total_pages, extra_data="")
 
     if edit:
@@ -174,21 +155,13 @@ async def show_all_numbers(message_or_call, page=1, edit=False):
     else:
         await status_msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
-@dp.message(F.text == "📋 Numbers")
+@dp.message(F.text == "📋 All Numbers")
 async def handle_all_numbers_btn(message: types.Message):
     await show_all_numbers(message, page=1, edit=False)
 
 @dp.callback_query(F.data.startswith("view_all:"))
 async def view_all_numbers(callback: types.CallbackQuery):
-    # Data Format: view_all : PAGE_NUMBER
-    # Note: get_pagination_kb with empty extra_data might produce "view_all::2" or "view_all:2" 
-    # Let's handle splitting carefully.
-    
     parts = callback.data.split(":")
-    # parts[0] is "view_all"
-    # If extra_data was empty in get_pagination_kb, it might be:
-    # "view_all:PAGE" -> len 2
-    # or "view_all::PAGE" -> len 3
     
     if len(parts) == 3:
         page = int(parts[2])
@@ -202,13 +175,11 @@ async def view_all_numbers(callback: types.CallbackQuery):
 # ===================== RANGES HANDLER (🔎 Choose Range) =====================
 
 async def show_ranges(message_or_call, edit=False):
-    """Fetches numbers and displays Ranges as Inline Buttons."""
     if isinstance(message_or_call, types.Message):
         status_msg = await message_or_call.answer("🔄 Fetching numbers...")
     else:
         status_msg = message_or_call.message
 
-    # 1. Fetch Numbers
     if not edit:
         ok, msg = await api.fetch_numbers()
         if not ok:
@@ -217,27 +188,20 @@ async def show_ranges(message_or_call, edit=False):
             else: await status_msg.edit_text(text, parse_mode="HTML")
             return
 
-    # 2. Check Data
     if not hasattr(state, "numbers_data") or not state.numbers_data:
         text = "⚠️ No numbers found."
         if edit: await status_msg.edit_text(text, parse_mode="HTML")
         else: await status_msg.edit_text(text, parse_mode="HTML")
         return
 
-    # 3. Build Inline Buttons for Ranges
+    # --- MODIFIED: Single Column Layout ---
     buttons = []
-    row = []
     for rng in sorted(state.numbers_data.keys()):
         count = len(state.numbers_data[rng])
         btn_text = f"{rng} ({count})"
-        # Callback: view_rng : RANGE_NAME : PAGE_NUMBER
-        row.append(InlineKeyboardButton(text=btn_text, callback_data=f"view_rng:{rng}:1"))
-        if len(row) == 2:
-            buttons.append(row)
-            row = []
-    if row: buttons.append(row)
+        # Directly append a list containing ONE button to make it a single column
+        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"view_rng:{rng}:1")])
 
-    # 4. Send/Edit Message
     text = "🔎 <b>Select a Range</b> to view numbers:"
     if edit:
         await status_msg.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
@@ -255,7 +219,6 @@ async def back_to_ranges(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("view_rng:"))
 async def view_range_numbers(callback: types.CallbackQuery):
-    # Data Format: view_rng : RANGE_NAME : PAGE_NUMBER
     parts = callback.data.split(":")
     range_name = parts[1]
     page = int(parts[2])
@@ -264,7 +227,6 @@ async def view_range_numbers(callback: types.CallbackQuery):
         await callback.answer("Range not found (refresh needed).")
         return
 
-    # Pagination Logic
     items = state.numbers_data[range_name]
     total_items = len(items)
     total_pages = math.ceil(total_items / PAGE_SIZE)
@@ -275,18 +237,15 @@ async def view_range_numbers(callback: types.CallbackQuery):
     
     current_items = items[start_idx:end_idx]
     
-    # Render List
     text = f"📂 <b>Range:</b> {range_name} (Page {page}/{total_pages})\n"
     text += f"Total: {total_items} numbers\n\n"
     
     for item in current_items:
-        # Ensure number has + prefix
         num = item['number']
         if not num.startswith("+"):
             num = f"+{num}"
         text += f"• <code>{num}</code>\n"
         
-    # Generate Pagination Keyboard
     kb = get_pagination_kb("view_rng", page, total_pages, range_name)
     
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
@@ -322,7 +281,6 @@ async def ask_remove_range(message: types.Message):
         await status_msg.edit_text("⚠️ No numbers to remove.")
         return
 
-    # Build Buttons
     buttons = []
     for rng in sorted(state.numbers_data.keys()):
         count = len(state.numbers_data[rng])
@@ -376,7 +334,6 @@ async def cancel_handler(callback: types.CallbackQuery):
 
 @dp.message(F.text)
 async def handle_text(message: types.Message):
-    # 1. Handle Add Number Input
     if state.add_number_pending.get(message.chat.id):
         term_id = message.text.strip()
         
@@ -395,7 +352,6 @@ async def handle_text(message: types.Message):
             await status_msg.edit_text(f"❌ {msg}", parse_mode="HTML")
         return
 
-    # 2. Handle Status
     if message.text == "📊 Status":
         connected = "✅ YES" if state.current_livesms_token else "❌ NO"
         ua_stat = "✅ Captured" if state.current_user_agent else "⚠️ Missing (Wait for browser)"
@@ -408,7 +364,6 @@ async def handle_text(message: types.Message):
         )
         await message.answer(msg, parse_mode="HTML")
         
-    # 3. Handle History
     elif message.text == "📜 History":
         if not state.otp_history:
             await message.answer("📜 No OTPs yet.")
@@ -423,14 +378,11 @@ async def handle_text(message: types.Message):
 # ===================== STARTUP =====================
 
 async def main():
-    # 1. Start Browser Thread (Background)
     t = threading.Thread(target=browser_thread_target, daemon=True)
     t.start()
     
-    # 2. Start WebSocket Loop (Async Background)
     asyncio.create_task(websocket_loop())
     
-    # 3. Start Bot Polling
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
