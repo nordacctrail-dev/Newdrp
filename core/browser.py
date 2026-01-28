@@ -19,7 +19,8 @@ def update_cookies_and_tokens(bot):
         sb = bot.sb if hasattr(bot, 'sb') else bot
         driver = getattr(bot, "driver", None) or sb.driver
         
-        # 1. CAPTURE USER-AGENT
+        # --- 1. CAPTURE USER-AGENT (CRITICAL for API) ---
+        # We need this to make the API requests match the browser
         if not getattr(state, "current_user_agent", None):
             try:
                 ua = driver.execute_script("return navigator.userAgent;")
@@ -28,7 +29,7 @@ def update_cookies_and_tokens(bot):
                     log(f"🕵️ Captured User-Agent: {ua[:30]}...", "INFO")
             except: pass
 
-        # 2. CAPTURE COOKIES (CDP)
+        # --- 2. CAPTURE COOKIES (CDP Method) ---
         try:
             cookie_data = driver.execute_cdp_cmd('Network.getCookies', {})
             all_cookies = cookie_data.get('cookies', [])
@@ -41,7 +42,7 @@ def update_cookies_and_tokens(bot):
                     update_cookies_and_tokens.logged = True
         except: pass
 
-        # 3. GET CSRF TOKEN
+        # --- 3. GET CSRF TOKEN ---
         try:
             csrf = sb.get_attribute('meta[name="csrf-token"]', "content")
             if csrf:
@@ -50,6 +51,7 @@ def update_cookies_and_tokens(bot):
             
     except Exception as e:
         log(f"Token Sync Warning: {e}", "WARN")
+        # Only crash if driver is truly dead
         if "connectable" in str(e) or "refused" in str(e) or "process is dead" in str(e):
             raise e
 
@@ -65,7 +67,7 @@ def get_socket_io_creds(bot):
         if m:
             token, user = m.group(1).strip(), m.group(2).strip()
 
-        # Regex 2
+        # Regex 2 (Fallback)
         if not (token and user):
             m_t = re.search(r"token['\"]?\s*:\s*['\"]([^'\"<>]+)['\"]", html)
             m_u = re.search(r"user['\"]?\s*:\s*['\"]([^'\"<>]+)['\"]", html)
@@ -83,66 +85,76 @@ def get_socket_io_creds(bot):
     return False
 
 def login_sequence(bot):
-    """Performs login with robust fallback for Cloudflare loops."""
+    """Performs login using uc_gui_click_captcha for Cloudflare."""
     sb = bot.sb if hasattr(bot, 'sb') else bot
     
     log(f"🌐 Navigating to {config.LOGIN_URL}...", "INFO")
+    
+    # 1. Navigate
     try:
-        bot.safe_get(config.LOGIN_URL)
-    except Exception as e:
-        log(f"Navigation error: {e}", "WARN")
+        sb.activate_cdp_mode(config.LOGIN_URL) # Better than safe_get for anti-detect
+    except:
+        try:
+            bot.safe_get(config.LOGIN_URL)
+        except Exception as e:
+            log(f"Navigation error: {e}", "WARN")
 
-    # --- ROBUST WAIT LOOP ---
-    # Don't just wait for form. Check for stuck state.
+    # 2. Loop to handle Cloudflare or Login Form
     log("⏳ Waiting for Login Page or Captcha...", "INFO")
     
-    for i in range(15): # Try for 30-45 seconds
+    for i in range(15): # Loop for ~45 seconds
+        # Check success first
         if "portal" in sb.get_current_url() or "live" in sb.get_current_url():
             log("✅ Already logged in!", "OK")
             update_cookies_and_tokens(bot)
             get_socket_io_creds(bot)
             return True
 
+        # Check for Login Form
         if sb.is_element_visible("#card-email"):
-            break # Form found! Proceed to type.
+            break # Form found! Exit loop and type.
 
-        # If stuck on "Just a moment" or Cloudflare iframe
+        # Check for Cloudflare
         title = sb.get_title()
         if "Just a moment" in title or sb.is_element_visible('iframe[src*="cloudflare"]'):
-            log(f"⚠️ Stuck on Cloudflare (Attempt {i+1})...", "WARN")
+            log(f"🤖 Cloudflare Detected (Attempt {i+1})...", "WARN")
+            
+            # --- THE FIX: Use SeleniumBase's native CAPTCHA clicker ---
             try:
-                # Try clicking center screen (blind click often hits the widget)
+                sb.uc_gui_click_captcha() 
+                log("🖱️ Triggered uc_gui_click_captcha()", "OK")
+            except Exception as e:
+                log(f"GUI Click failed: {e}", "WARN")
+                # Fallback: Blind click center
                 sb.execute_script("document.elementFromPoint(window.innerWidth/2, window.innerHeight/2).click();")
-                # Try clicking iframe specific
-                if sb.is_element_visible('iframe[src*="cloudflare"]'):
-                    bot.smart_click('iframe[src*="cloudflare"]')
-            except: pass
         
         time.sleep(3)
 
-    # --- TYPING ---
+    # 3. Enter Credentials (only if form exists)
+    if not sb.is_element_visible("#card-email"):
+        log(f"❌ Login form never appeared. URL: {sb.get_current_url()}", "ERROR")
+        return False # Triggers browser restart
+
     log("⌨️ Entering Credentials...", "INFO")
     try:
         sb.type("#card-email", config.IVASMS_EMAIL)
         sb.type("#card-password", config.IVASMS_PASSWORD)
-    except Exception as e:
-        log("❌ Login form missing. Retrying navigation...", "ERROR")
-        return False
-
-    log("⌨️ Clicking Login...", "INFO")
-    try:
-        # Try wrapper click first, then JS fallback
+        time.sleep(1)
+        
+        # Click Login
         try:
             bot.smart_click('button[type="submit"]')
         except:
             sb.execute_script("document.querySelector('button[type=\"submit\"]').click()")
-    except: pass
+            
+    except Exception as e:
+        log(f"Typing failed: {e}", "ERROR")
+        return False
 
     log("⏳ Waiting for Redirect...", "INFO")
-    time.sleep(5)
     
-    # Wait for URL change
-    for _ in range(20):
+    # 4. Wait for Dashboard
+    for _ in range(30):
         if "portal" in sb.get_current_url() or "live" in sb.get_current_url():
             log("✅ Login Successful!", "OK")
             time.sleep(2)
@@ -162,6 +174,7 @@ def browser_thread_target():
         try:
             log("🚀 Launching Browser Session...", "INFO")
             
+            # headless=False is REQUIRED for uc_gui_click_captcha to work
             with StealthBot(headless=False, input_strategy=my_input) as bot:
                 state.driver_ref = bot
                 sb = bot.sb if hasattr(bot, 'sb') else bot
