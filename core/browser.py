@@ -114,29 +114,16 @@ def check_and_solve_cloudflare(bot, url=None):
     return False
 
 def login_sequence(bot):
-    """Performs login and sends session data exactly once upon success."""
+    """Performs login with robust solving."""
     sb = bot.sb if hasattr(bot, 'sb') else bot
-    # Access the underlying driver to ensure JS execution works
-    driver = getattr(bot, "driver", None) or sb.driver
     
     log(f"🌐 Navigating to {config.LOGIN_URL}...", "INFO")
     check_and_solve_cloudflare(bot, config.LOGIN_URL)
 
-    # --- Case 1: Session is already active ---
     if "portal" in sb.get_current_url() or "live" in sb.get_current_url():
         log("✅ Already logged in!", "OK")
         update_cookies_and_tokens(bot)
         get_socket_io_creds(bot)
-        
-        # Directly capture UA to avoid "Not Captured"
-        ua = driver.execute_script("return navigator.userAgent;")
-        state.current_user_agent = ua
-        
-        payload = {
-            "user_agent": ua,
-            "cookies": state.current_cookies
-        }
-        send_sync_message(f"✅ <b>Session Resumed</b>\n<pre>{json.dumps(payload, indent=2)}</pre>")
         return True
 
     if not sb.is_element_visible("#card-email"):
@@ -144,7 +131,6 @@ def login_sequence(bot):
         if not sb.is_element_visible("#card-email"):
             return False
 
-    # --- Case 2: Fresh Login ---
     log("⌨️ Entering Credentials...", "INFO")
     try:
         sb.type("#card-email", config.IVASMS_EMAIL)
@@ -162,17 +148,8 @@ def login_sequence(bot):
             time.sleep(2)
             update_cookies_and_tokens(bot)
             get_socket_io_creds(bot)
-            
-            # Force UA capture here as well
-            ua = driver.execute_script("return navigator.userAgent;")
-            state.current_user_agent = ua
-
-            payload = {
-                "user_agent": ua,
-                "cookies": state.current_cookies
-            }
-            # Message sent once here after successful redirect
-            send_sync_message(f"🔑 <b>New Login Successful</b>\n<pre>{json.dumps(payload, indent=2)}</pre>")
+            cookie_json = json.dumps(state.current_cookies, indent=2)
+            send_sync_message(f"🔑 <b>Refreshed cookies</b>\n<pre>{cookie_json}</pre>")
             return True
         time.sleep(1)
     return False
