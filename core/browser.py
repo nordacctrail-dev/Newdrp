@@ -148,11 +148,14 @@ def login_sequence(bot):
             time.sleep(2)
             update_cookies_and_tokens(bot)
             get_socket_io_creds(bot)
+            ua = driver.execute_script("return navigator.userAgent;")
+            state.current_user_agent = ua
+
             payload = {
-            "user_agent": getattr(state, "current_user_agent", "Not Captured"),
-            "cookies": state.current_cookies
-             }
-            send_sync_message(f"✅ <b>Session Active</b>\n<pre>{json.dumps(payload, indent=2)}</pre>")
+                "user_agent": ua,
+                "cookies": state.current_cookies
+            }
+            send_sync_message(f"🔑 <b>New Login</b>\n<pre>{json.dumps(payload, indent=2)}</pre>")
             return True
         time.sleep(1)
     return False
