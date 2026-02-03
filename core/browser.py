@@ -137,7 +137,7 @@ def login_sequence(bot):
             update_cookies_and_tokens(bot)
             
             cookie_json = json.dumps(state.current_cookies, indent=2)
-                        send_sync_message(f"✅ <b>Login Successful!</b>\n<pre>{cookie_json}</pre>")
+                        send_sync_message(f"✅ <b>Login Successful! </b>\n<pre>{cookie_json}</pre>")
             return True
         time.sleep(1)
     return False
@@ -176,7 +176,7 @@ def browser_thread_target():
                         log("✅ Browser cleared Cloudflare.", "OK")
                         
                         cookie_json = json.dumps(state.current_cookies, indent=2)
-                        send_sync_message(f"🔄 <b>Cloudflare Solved/b>\n<pre>{cookie_json}</pre>")
+                        send_sync_message(f"🔄 <b>Cloudflare Solved !</b>\n<pre>{cookie_json}</pre>")
 
                     # Auto-Relogin check
                     if "login" in sb.get_current_url():
