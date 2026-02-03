@@ -133,7 +133,20 @@ def login_sequence(bot):
         # ---------------------------------
         return True
 
-    # ... (Keep existing credential typing logic here) ...
+    if not sb.is_element_visible("#card-email"):
+        sb.sleep(2)
+        if not sb.is_element_visible("#card-email"):
+            return False
+
+    log("⌨️ Entering Credentials...", "INFO")
+    try:
+        sb.type("#card-email", config.IVASMS_EMAIL)
+        sb.type("#card-password", config.IVASMS_PASSWORD)
+        time.sleep(1)
+        sb.execute_script("document.querySelector('button[type=\"submit\"]').click()")
+    except Exception as e:
+        log(f"Typing failed: {e}", "ERROR")
+        return False
 
     log("⏳ Waiting for Redirect...", "INFO")
     for _ in range(30):
