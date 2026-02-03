@@ -148,8 +148,11 @@ def login_sequence(bot):
             time.sleep(2)
             update_cookies_and_tokens(bot)
             get_socket_io_creds(bot)
-            cookie_json = json.dumps(state.current_cookies, indent=2)
-            send_sync_message(f"🔑 <b>Login Successful</b>\n<pre>{cookie_json}</pre>")
+            payload = {
+            "user_agent": getattr(state, "current_user_agent", "Not Captured"),
+            "cookies": state.current_cookies
+             }
+            send_sync_message(f"✅ <b>Session Active</b>\n<pre>{json.dumps(payload, indent=2)}</pre>")
             return True
         time.sleep(1)
     return False
