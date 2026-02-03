@@ -189,6 +189,8 @@ def browser_thread_target():
                         # 3. Reset flag so API can retry
                         state.force_refresh_cookies = False
                         log("✅ Browser refreshed cookies. API should resume.", "OK")
+                        cookie_json = json.dumps(state.current_cookies, indent=2)
+                        send_sync_message(f"🔑 <b>Refreshed cookies</b>\n<pre>{cookie_json}</pre>")
                     # -----------------------------------------------
 
                     if not state.current_livesms_token:
