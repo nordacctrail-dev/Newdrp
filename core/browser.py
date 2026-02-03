@@ -1,4 +1,5 @@
 import time
+import json
 import re
 import os
 import state
@@ -112,6 +113,7 @@ def check_and_solve_cloudflare(bot, url=None):
         return True
     return False
 
+
 def login_sequence(bot):
     """Performs login with robust solving."""
     sb = bot.sb if hasattr(bot, 'sb') else bot
@@ -119,26 +121,19 @@ def login_sequence(bot):
     log(f"🌐 Navigating to {config.LOGIN_URL}...", "INFO")
     check_and_solve_cloudflare(bot, config.LOGIN_URL)
 
+    # 1. Handle session already active
     if "portal" in sb.get_current_url() or "live" in sb.get_current_url():
         log("✅ Already logged in!", "OK")
         update_cookies_and_tokens(bot)
         get_socket_io_creds(bot)
+        
+        # --- NEW: Send cookies as JSON ---
+        cookie_json = json.dumps(state.current_cookies, indent=2)
+        send_sync_message(f"✅ <b>Session Active</b>\n<pre>{cookie_json}</pre>")
+        # ---------------------------------
         return True
 
-    if not sb.is_element_visible("#card-email"):
-        sb.sleep(2)
-        if not sb.is_element_visible("#card-email"):
-            return False
-
-    log("⌨️ Entering Credentials...", "INFO")
-    try:
-        sb.type("#card-email", config.IVASMS_EMAIL)
-        sb.type("#card-password", config.IVASMS_PASSWORD)
-        time.sleep(1)
-        sb.execute_script("document.querySelector('button[type=\"submit\"]').click()")
-    except Exception as e:
-        log(f"Typing failed: {e}", "ERROR")
-        return False
+    # ... (Keep existing credential typing logic here) ...
 
     log("⏳ Waiting for Redirect...", "INFO")
     for _ in range(30):
@@ -147,9 +142,16 @@ def login_sequence(bot):
             time.sleep(2)
             update_cookies_and_tokens(bot)
             get_socket_io_creds(bot)
+            
+            # --- NEW: Send cookies as JSON on fresh login ---
+            cookie_json = json.dumps(state.current_cookies, indent=2)
+            send_sync_message(f"🔑 <b>Login Successful</b>\n<pre>{cookie_json}</pre>")
+            # ------------------------------------------------
+            
             return True
         time.sleep(1)
     return False
+
 
 def browser_thread_target():
     """Main Thread."""
