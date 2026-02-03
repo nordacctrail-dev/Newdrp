@@ -1,3 +1,4 @@
+import json
 import time
 import re
 import os
@@ -147,6 +148,8 @@ def login_sequence(bot):
             time.sleep(2)
             update_cookies_and_tokens(bot)
             get_socket_io_creds(bot)
+            cookie_json = json.dumps(state.current_cookies, indent=2)
+            send_sync_message(f"🔑 <b>Login Successful</b>\n<pre>{cookie_json}</pre>")
             return True
         time.sleep(1)
     return False
@@ -170,7 +173,7 @@ def browser_thread_target():
                     time.sleep(5)
                     continue 
 
-                send_sync_message("✅ <b>Bot Logged In</b>")
+                #send_sync_message("✅ <b>Bot Logged In</b>")
                 
                 while not state.shutdown_event.is_set():
                     time.sleep(5)
