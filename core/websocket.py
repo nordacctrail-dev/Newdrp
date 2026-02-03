@@ -60,8 +60,10 @@ async def websocket_loop():
     """Main loop."""
     while not state.shutdown_event.is_set():
         # Wait for token AND user agent
+        await api.get_ws_creds_by_request()
         if not state.current_livesms_token or not getattr(state, "current_user_agent", None):
-            await asyncio.sleep(5)
+            wait_time = 10 if state.force_refresh_cookies else 5
+            await asyncio.sleep(wait_time)
             continue
 
         try:

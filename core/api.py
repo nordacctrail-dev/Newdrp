@@ -6,6 +6,39 @@ from utils import log
 import re
 import time
 
+async def get_ws_creds_by_request():
+    """
+    Fetch WebSocket token/user via HTTP request using captured cookies.
+    Triggers Cloudflare solving if a 403 is encountered.
+    """
+    url = config.LIVE_SMS_URL
+    headers, cookies = await get_headers_and_cookies()
+    
+    try:
+        async with aiohttp.ClientSession(cookies=cookies) as session:
+            async with session.get(url, headers=headers, timeout=15) as resp:
+                # Detection: If blocked, signal the browser to solve
+                if resp.status in [403, 503]:
+                    log("🛡️ WS Cred Fetch Blocked (403). Triggering Browser Solver...", "WARN")
+                    state.force_refresh_cookies = True
+                    return False
+
+                html = await resp.text()
+                # Same regex logic moved to request-based HTML
+                m = re.search(
+                    r"io\.connect\('https://ivasms\.com:2087/livesms',\s*\{\s*query\s*:\s*\{\s*token:\s*'([^']+)'[^}]*user:\"([^\"}]+)\"", 
+                    html, 
+                    re.DOTALL
+                )
+                
+                if m:
+                    state.current_livesms_token = m.group(1).strip()
+                    state.current_livesms_user = m.group(2).strip()
+                    return True
+    except Exception as e:
+        log(f"WS Cred Request Failed: {e}", "ERROR")
+    return False
+
 async def get_headers_and_cookies():
     """
     Constructs headers and cookies using the LIVE browser state.

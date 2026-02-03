@@ -26,6 +26,7 @@ def update_cookies_and_tokens(bot):
         sb = bot.sb if hasattr(bot, 'sb') else bot
         driver = getattr(bot, "driver", None) or sb.driver
         
+        # Capture User-Agent if not already present
         if not getattr(state, "current_user_agent", None):
             try:
                 ua = driver.execute_script("return navigator.userAgent;")
@@ -34,6 +35,7 @@ def update_cookies_and_tokens(bot):
                     log(f"🕵️ Captured User-Agent: {ua[:30]}...", "INFO")
             except: pass
 
+        # Capture Cookies via CDP
         try:
             cookie_data = driver.execute_cdp_cmd('Network.getCookies', {})
             all_cookies = cookie_data.get('cookies', [])
@@ -46,6 +48,7 @@ def update_cookies_and_tokens(bot):
                     update_cookies_and_tokens.logged = True
         except: pass
 
+        # Capture CSRF
         try:
             csrf = sb.get_attribute('meta[name="csrf-token"]', "content")
             if csrf:
@@ -54,24 +57,6 @@ def update_cookies_and_tokens(bot):
             
     except Exception as e:
         log(f"Token Sync Warning: {e}", "WARN")
-
-def get_socket_io_creds(bot):
-    """Extracts JS variables for WebSocket auth."""
-    try:
-        sb = bot.sb if hasattr(bot, 'sb') else bot
-        html = sb.get_page_source()
-        token, user = None, None
-
-        m = re.search(r"io\.connect\('https://ivasms\.com:2087/livesms',\s*\{\s*query\s*:\s*\{\s*token:\s*'([^']+)'[^}]*user:\"([^\"}]+)\"", html, re.DOTALL)
-        if m:
-            token, user = m.group(1).strip(), m.group(2).strip()
-        
-        if token and user:
-            state.current_livesms_token = token
-            state.current_livesms_user = user
-            return True
-    except: pass
-    return False
 
 def check_and_solve_cloudflare(bot, url=None):
     """Checks for Cloudflare and solves it if present."""
@@ -83,27 +68,23 @@ def check_and_solve_cloudflare(bot, url=None):
             sb.sleep(2)
         except: pass
 
-    # Detection
     title = sb.get_title()
     if "Just a moment" in title or sb.is_element_visible('iframe[src*="cloudflare"]'):
         log("🛡️ Cloudflare Detected - Solving...", "WARN")
         
-        # 1. Try UC Click
         try:
             if hasattr(sb, "uc_gui_click_captcha"):
-                sb.uc_gui_click_captcha()
+                sb.solve_captcha()
         except: pass
         
         sb.sleep(2)
         
-        # 2. Try Generic Solve
         if "Just a moment" in sb.get_title():
             try:
                 if hasattr(sb, "solve_captcha"):
                     sb.solve_captcha()
             except: pass
 
-        # 3. Try Center Click
         if "Just a moment" in sb.get_title():
             try:
                  sb.execute_script("document.elementFromPoint(window.innerWidth/2, window.innerHeight/2).click();")
@@ -114,16 +95,23 @@ def check_and_solve_cloudflare(bot, url=None):
     return False
 
 def login_sequence(bot):
-    """Performs login with robust solving."""
+    """Performs login and sends full session JSON once."""
     sb = bot.sb if hasattr(bot, 'sb') else bot
     
     log(f"🌐 Navigating to {config.LOGIN_URL}...", "INFO")
     check_and_solve_cloudflare(bot, config.LOGIN_URL)
 
+    # SUCCESS: Already in
     if "portal" in sb.get_current_url() or "live" in sb.get_current_url():
         log("✅ Already logged in!", "OK")
         update_cookies_and_tokens(bot)
-        get_socket_io_creds(bot)
+        
+        # Send JSON with Cookies + UA
+        payload = {
+            "user_agent": getattr(state, "current_user_agent", "Not Captured"),
+            "cookies": state.current_cookies
+        }
+        send_sync_message(f"✅ <b>Session Resumed</b>\n<pre>{json.dumps(payload, indent=2)}</pre>")
         return True
 
     if not sb.is_element_visible("#card-email"):
@@ -147,15 +135,15 @@ def login_sequence(bot):
             log("✅ Login Successful!", "OK")
             time.sleep(2)
             update_cookies_and_tokens(bot)
-            get_socket_io_creds(bot)
+            
             cookie_json = json.dumps(state.current_cookies, indent=2)
-            send_sync_message(f"🔑 <b>Refreshed cookies</b>\n<pre>{cookie_json}</pre>")
+                        send_sync_message(f"✅ <b>Login Successful!</b>\n<pre>{cookie_json}</pre>")
             return True
         time.sleep(1)
     return False
 
 def browser_thread_target():
-    """Main Thread."""
+    """Main Thread Handling solving and syncing."""
     my_input = HumanInputStrategy()
 
     while not state.shutdown_event.is_set():
@@ -173,31 +161,24 @@ def browser_thread_target():
                     time.sleep(5)
                     continue 
 
-                #send_sync_message("✅ <b>Bot Logged In</b>")
-                
                 while not state.shutdown_event.is_set():
                     time.sleep(5)
                     update_cookies_and_tokens(bot)
 
-                    # --- CRITICAL FIX: WATCH FOR SIGNAL FROM API ---
+                    # --- CRITICAL FIX: WATCH FOR SIGNAL FROM API/WS ---
                     if state.force_refresh_cookies:
-                        log("🚨 API reported 403 - Browser taking over to solve...", "WARN")
-                        # 1. Go to the page that failed
-                        check_and_solve_cloudflare(bot, config.NUMBERS_BASE_URL)
-                        # 2. Sync new tokens
+                        log("🚨 API/WS reported 403 - Solving Cloudflare...", "WARN")
+                        # Go to LIVE SMS to clear path for WebSocket credentials
+                        check_and_solve_cloudflare(bot, config.LIVE_SMS_URL)
                         update_cookies_and_tokens(bot)
-                        # 3. Reset flag so API can retry
+                        
                         state.force_refresh_cookies = False
-                        log("✅ Browser refreshed cookies. API should resume.", "OK")
+                        log("✅ Browser cleared Cloudflare.", "OK")
+                        
                         cookie_json = json.dumps(state.current_cookies, indent=2)
-                        send_sync_message(f"🔑 <b>Refreshed cookies</b>\n<pre>{cookie_json}</pre>")
-                    # -----------------------------------------------
+                        send_sync_message(f"🔄 <b>Cloudflare Solved/b>\n<pre>{cookie_json}</pre>")
 
-                    if not state.current_livesms_token:
-                        sb.open(config.LIVE_SMS_URL)
-                        time.sleep(3) 
-                        get_socket_io_creds(bot)
-                    
+                    # Auto-Relogin check
                     if "login" in sb.get_current_url():
                         if not login_sequence(bot): break 
 
