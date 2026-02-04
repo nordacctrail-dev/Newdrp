@@ -6,13 +6,12 @@ from urllib.parse import urlencode
 from utils import log, extract_otp
 from core.notifier import send_otp_notification
 import core.api as api
-
 # Initialize Client
 sio = socketio.AsyncClient(logger=True, engineio_logger=True, ssl_verify=False)
 
 @sio.event(namespace='/livesms')
 async def connect():
-    log("✅ WebSocket Connected (/livesms)!", "OK")
+    log("伯 WebSocket Connected (/livesms)!", "OK")
 
 @sio.event(namespace='/livesms')
 async def connect_error(data):
@@ -20,7 +19,7 @@ async def connect_error(data):
 
 @sio.event(namespace='/livesms')
 async def disconnect():
-    log("⚠️ WebSocket Disconnected (/livesms)", "WARN")
+    log("伯 WebSocket Disconnected (/livesms)", "WARN")
 
 @sio.on('*', namespace='/livesms')
 async def catch_all(event, data):
@@ -55,7 +54,7 @@ def process_payload(payload):
         
         state.otp_stats["total"] += 1
         asyncio.create_task(send_otp_notification(otp_data))
-        log(f"📩 OTP: {otp_code} | {otp_data['originator']}", "OK")
+        log(f"櫨 OTP: {otp_code} | {otp_data['originator']}", "OK")
 
 async def websocket_loop():
     """Main loop."""
@@ -69,7 +68,7 @@ async def websocket_loop():
 
         try:
             if not sio.connected:
-                log(f"🔌 DEBUG: Preparing WS Connection...", "INFO")
+                log(f"剥 DEBUG: Preparing WS Connection...", "INFO")
                 
                 params = {
                     'token': state.current_livesms_token,
@@ -81,7 +80,8 @@ async def websocket_loop():
                 query_string = urlencode(params)
                 connection_url = f"{base_host}?{query_string}"
 
-                # DYNAMIC HEADERS
+                # DYNAMIC HEADERS (The Fix)
+                # We use the UA captured from the browser
                 headers = {
                     "User-Agent": state.current_user_agent,
                     "Origin": "https://www.ivasms.com",
@@ -92,7 +92,7 @@ async def websocket_loop():
                     cookie_string = "; ".join([f"{k}={v}" for k,v in state.current_cookies.items()])
                     headers["Cookie"] = cookie_string
 
-                log(f"🔄 Connecting with UA: {state.current_user_agent[:30]}...", "INFO")
+                log(f"迫 Connecting with UA: {state.current_user_agent[:30]}...", "INFO")
 
                 await sio.connect(
                     connection_url, 
@@ -106,34 +106,18 @@ async def websocket_loop():
             
         except Exception as e:
             err_str = str(e).lower()
+            # --- CRITICAL FIX: Trigger Cloudflare Solve on WS 403 ---
             if "401" in err_str or "403" in err_str or "handshake" in err_str or "rejected" in err_str:
                 log(f"🚨 WS Handshake 403/Rejected: {e}", "WARN")
                 log("🔄 Triggering Browser Cloudflare Solver...", "WARN")
                 
+                # 1. Signal the browser to go solve Cloudflare
                 state.force_refresh_cookies = True
+                
+                # 2. Clear token so the browser re-scrapes it AFTER solving
                 state.current_livesms_token = None
             else:
                 log(f"WS Loop Exception: {e}", "ERROR")
             
-            await asyncio.sleep(15)
-
-# --- NEW WATCHDOG FUNCTION ---
-async def credential_watchdog():
-    """
-    Proactively checks credentials every 15 seconds.
-    If blocked (403), api.get_ws_creds_by_request automatically triggers the browser solver.
-    """
-    log("🛡️ Credential Watchdog Started", "INFO")
-    while not state.shutdown_event.is_set():
-        try:
-            # Don't check if we are already in the middle of solving
-            if not state.force_refresh_cookies:
-                # This function returns True if success, False if blocked/failed
-                # Crucially: It internally sets state.force_refresh_cookies = True on 403
-                await api.get_ws_creds_by_request()
-            
-            # Check every 15 seconds (adjust if needed, but don't go too low or you risk bans)
-            await asyncio.sleep(15) 
-        except Exception as e:
-            log(f"Watchdog Error: {e}", "ERROR")
+            # Wait a bit to let the browser do its job
             await asyncio.sleep(15)
