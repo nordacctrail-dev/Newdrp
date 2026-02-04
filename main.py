@@ -16,9 +16,10 @@ from aiogram.filters import Command
 
 # Import core modules
 import config
-import utils  # Merged State + Utils
+import utils
 from core.browser import browser_thread_target
-from core.websocket import websocket_loop
+# --- FIX: Added credential_watchdog to imports ---
+from core.websocket import websocket_loop, credential_watchdog 
 from core import api
 from core.scanner import TerminationScanner
 import core.database as db
@@ -34,21 +35,14 @@ PAGE_SIZE = 20
 # ===================== DATA HELPERS =====================
 
 def get_service_from_name(name):
-    """
-    Extracts service name from range (e.g. "Google 1" -> "Google").
-    """
     match = re.match(r"([a-zA-Z\s]+)", name)
     if match:
         return match.group(1).strip()
     return "Other"
 
 async def build_tree_data():
-    """
-    Organizes flat utils.numbers_data into Countries and Categories.
-    Returns: (countries_dict, categories_dict)
-    """
-    countries = {}  # {'🇺🇸 USA': ['Range1', ...]}
-    categories = {} # {'Facebook': ['Range1', ...]}
+    countries = {}
+    categories = {}
     
     if not utils.numbers_data:
         return {}, {}
@@ -56,7 +50,6 @@ async def build_tree_data():
     for rng, items in utils.numbers_data.items():
         if not items: continue
         
-        # 1. Detect Country (from first number)
         first_num = items[0].get('number', '')
         c_name, flag = utils.CountryManager.get_country_info(first_num)
         c_key = f"{flag} {c_name}"
@@ -64,7 +57,6 @@ async def build_tree_data():
         if c_key not in countries: countries[c_key] = []
         countries[c_key].append(rng)
         
-        # 2. Detect Category
         svc = get_service_from_name(rng)
         if svc not in categories: categories[svc] = []
         categories[svc].append(rng)
@@ -90,10 +82,6 @@ def get_cancel_kb():
     ])
 
 def get_tree_root_kb(mode):
-    """
-    Root Menu for Tree Navigation.
-    mode: 'exp' (Export), 'view' (Choose Range), 'rm' (Remove)
-    """
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="🌍 By Country", callback_data=f"tree:{mode}:ctry_list"),
@@ -107,7 +95,6 @@ def get_tree_root_kb(mode):
     ])
 
 def get_pagination_kb(prefix: str, current_page: int, total_pages: int):
-    """Simple pagination for number lists."""
     buttons = []
     if current_page > 1:
         buttons.append(InlineKeyboardButton(text="⬅️", callback_data=f"{prefix}:{current_page-1}"))
@@ -131,7 +118,7 @@ async def cmd_start(message: types.Message):
 async def cmd_menu(message: types.Message):
     await message.answer("📂 <b>Main Menu</b>", reply_markup=get_main_menu(), parse_mode="HTML")
 
-# ===================== UNIFIED TREE NAVIGATION (VIEW, EXPORT, REMOVE) =====================
+# ===================== TREE NAVIGATION =====================
 
 @dp.message(F.text == "📤 Export Numbers")
 async def handle_export_root(message: types.Message):
@@ -161,13 +148,11 @@ async def launch_tree_mode(message: types.Message, mode: str, title: str):
 
 @dp.callback_query(F.data.startswith("tree:"))
 async def tree_navigation(callback: types.CallbackQuery):
-    # Data format: tree:MODE:ACTION:VALUE
     parts = callback.data.split(":")
-    mode = parts[1]   # 'exp', 'view', 'rm'
-    action = parts[2] # 'ctry_list', 'sel_ctry', etc.
+    mode = parts[1]   
+    action = parts[2] 
     value = parts[3] if len(parts) > 3 else None
 
-    # --- 1. LISTS (Country / Category / Range) ---
     if action == "ctry_list":
         countries, _ = await build_tree_data()
         if not countries:
@@ -178,7 +163,6 @@ async def tree_navigation(callback: types.CallbackQuery):
         for ctry_key in sorted(countries.keys()):
             ranges = countries[ctry_key]
             count = sum(len(utils.numbers_data[r]) for r in ranges)
-            # Click -> Drill down
             kb.append([InlineKeyboardButton(text=f"{ctry_key} ({count})", callback_data=f"tree:{mode}:sel_ctry:{ctry_key}")])
         
         kb.append([InlineKeyboardButton(text="🔙 Back", callback_data=f"tree_back:{mode}")])
@@ -202,7 +186,6 @@ async def tree_navigation(callback: types.CallbackQuery):
     elif action == "rng_list":
         ranges = sorted(utils.numbers_data.keys())
         kb = []
-        # Pagination for ranges (Showing top 50)
         for r in ranges[:50]:
             count = len(utils.numbers_data[r])
             if mode == "exp": cb = f"do_exp:range:{r}"
@@ -213,7 +196,6 @@ async def tree_navigation(callback: types.CallbackQuery):
         kb.append([InlineKeyboardButton(text="🔙 Back", callback_data=f"tree_back:{mode}")])
         await callback.message.edit_text(f"📁 <b>Select Range ({mode.upper()})</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="HTML")
 
-    # --- 2. SELECTION (Drill down) ---
     elif action == "sel_ctry":
         countries, _ = await build_tree_data()
         target_ranges = countries.get(value, [])
@@ -234,7 +216,6 @@ async def tree_navigation(callback: types.CallbackQuery):
         else:
             await show_ranges_sublist(callback, f"📱 {value}", target_ranges, mode, "cat_list")
 
-    # --- 3. ALL NUMBERS ---
     elif action == "all":
         all_ranges = list(utils.numbers_data.keys())
         if mode == "exp":
@@ -255,32 +236,27 @@ async def tree_back(callback: types.CallbackQuery):
     )
 
 async def show_ranges_sublist(callback, title, ranges, mode, back_action):
-    """Displays specific ranges after filtering."""
     kb = []
     for r in sorted(ranges):
         count = len(utils.numbers_data[r])
         if mode == 'exp': cb = f"do_exp:range:{r}"
         elif mode == 'rm': cb = f"ask_rm:range:{r}"
         else: cb = f"view_rng:{r}:1"
-        
         kb.append([InlineKeyboardButton(text=f"📁 {r} ({count})", callback_data=cb)])
     
     kb.append([InlineKeyboardButton(text="🔙 Back", callback_data=f"tree:{mode}:{back_action}")])
     await callback.message.edit_text(f"<b>{title}</b>\nSelect a range:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="HTML")
 
-# ===================== ACTION EXECUTORS =====================
+# ===================== EXECUTORS =====================
 
-# --- EXPORT ---
 @dp.callback_query(F.data.startswith("do_exp:"))
 async def handle_specific_export(callback: types.CallbackQuery):
-    # do_exp:range:RangeName
     parts = callback.data.split(":")
     val = parts[2]
     await execute_export(callback, "Range", val, [val])
 
 async def execute_export(callback, type_label, name_label, ranges_list):
     await callback.message.edit_text("⏳ Generating file...")
-    
     lines = []
     total = 0
     lines.append(f"Export: {type_label} - {name_label}")
@@ -298,18 +274,11 @@ async def execute_export(callback, type_label, name_label, ranges_list):
             
     content = "\n".join(lines)
     fname = f"export_{type_label}_{name_label[:10]}.txt".replace(" ", "_")
-    
     f = BufferedInputFile(content.encode('utf-8'), filename=fname)
-    await callback.message.answer_document(
-        document=f, 
-        caption=f"✅ <b>Export Complete</b>\nTotal: {total} numbers", 
-        parse_mode="HTML"
-    )
+    await callback.message.answer_document(document=f, caption=f"✅ <b>Export Complete</b>\nTotal: {total} numbers", parse_mode="HTML")
     await callback.message.delete()
 
-# --- REMOVE ---
 async def ask_bulk_remove(callback, type_label, name_label, ranges_list):
-    """Confirmation Dialog for Bulk Remove."""
     count = 0
     for r in ranges_list:
         if r in utils.numbers_data:
@@ -319,36 +288,19 @@ async def ask_bulk_remove(callback, type_label, name_label, ranges_list):
         [InlineKeyboardButton(text="✅ YES, DELETE ALL", callback_data=f"exec_rm:{type_label}:{name_label}")],
         [InlineKeyboardButton(text="❌ Cancel", callback_data="cancel_action")]
     ])
-    
-    # Store ranges in state to retrieve later
     utils.temp_remove_list = ranges_list
-    
-    await callback.message.edit_text(
-        f"⚠️ <b>BULK DELETE WARNING</b> ⚠️\n\n"
-        f"Target: <b>{name_label}</b> ({type_label})\n"
-        f"Total Numbers: {count}\n"
-        f"Are you sure?",
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
+    await callback.message.edit_text(f"⚠️ <b>BULK DELETE WARNING</b> ⚠️\n\nTarget: <b>{name_label}</b> ({type_label})\nTotal: {count}\nAre you sure?", reply_markup=kb, parse_mode="HTML")
 
 @dp.callback_query(F.data.startswith("ask_rm:range:"))
 async def ask_single_remove(callback: types.CallbackQuery):
     range_name = callback.data.split(":")[2]
     count = len(utils.numbers_data.get(range_name, []))
-    
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Confirm Delete", callback_data=f"exec_rm:Range:{range_name}")],
         [InlineKeyboardButton(text="❌ Cancel", callback_data="cancel_action")]
     ])
-    
     utils.temp_remove_list = [range_name]
-    
-    await callback.message.edit_text(
-        f"⚠️ Delete Range <b>{range_name}</b>?\nContains {count} numbers.",
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
+    await callback.message.edit_text(f"⚠️ Delete Range <b>{range_name}</b>?\nContains {count} numbers.", reply_markup=kb, parse_mode="HTML")
 
 @dp.callback_query(F.data.startswith("exec_rm:"))
 async def execute_remove_action(callback: types.CallbackQuery):
@@ -363,13 +315,11 @@ async def execute_remove_action(callback: types.CallbackQuery):
     for rng in ranges_to_del:
         if rng in utils.numbers_data:
             ok, msg = await api.remove_range(rng)
-            if ok: 
-                total_deleted += 1
+            if ok: total_deleted += 1
                 
     await callback.message.edit_text(f"✅ <b>Deleted {total_deleted} Ranges.</b>", parse_mode="HTML")
     utils.temp_remove_list = []
 
-# --- VIEW (PAGINATION) ---
 @dp.callback_query(F.data.startswith("view_rng:"))
 async def view_range_numbers(callback: types.CallbackQuery):
     parts = callback.data.split(":")
@@ -397,7 +347,6 @@ async def view_range_numbers(callback: types.CallbackQuery):
         
     nav_btns = get_pagination_kb(f"view_rng:{range_name}", page, total_pages)
     back_row = [InlineKeyboardButton(text="🔙 Back to Menu", callback_data="tree_back:view")]
-    
     kb = InlineKeyboardMarkup(inline_keyboard=[nav_btns, back_row])
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
@@ -405,7 +354,7 @@ async def view_range_numbers(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "noop")
 async def noop_handler(c): await c.answer()
 
-# ===================== ADD NUMBER HANDLERS =====================
+# ===================== ADD NUMBER =====================
 
 @dp.message(F.text == "➕ Add Range")
 async def ask_add_range_category(message: types.Message):
@@ -419,7 +368,6 @@ async def ask_add_range_category(message: types.Message):
     
     kb_rows = []
     kb_rows.append([InlineKeyboardButton(text="🔥 Top 10 Hot Ranges", callback_data="add_cat:top10")])
-    
     current_row = []
     for cat in final_cats:
         current_row.append(InlineKeyboardButton(text=f"{cat}", callback_data=f"add_cat:{cat}"))
@@ -427,7 +375,6 @@ async def ask_add_range_category(message: types.Message):
             kb_rows.append(current_row)
             current_row = []
     if current_row: kb_rows.append(current_row)
-    
     kb_rows.append([InlineKeyboardButton(text="❌ Cancel", callback_data="cancel_action")])
     await message.answer("➕ <b>Add Range: Select Category</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows), parse_mode="HTML")
 
@@ -471,7 +418,7 @@ async def cancel_handler(c):
     utils.add_number_pending.pop(c.message.chat.id, None)
     await c.message.delete()
 
-# ===================== HISTORY & TEXT HANDLER =====================
+# ===================== HISTORY & TEXT =====================
 
 @dp.message(F.text)
 async def handle_text(message: types.Message):
@@ -511,6 +458,7 @@ async def main():
     t = threading.Thread(target=browser_thread_target, daemon=True)
     t.start()
     asyncio.create_task(websocket_loop())
+    # --- FIX: credential_watchdog is now imported correctly ---
     asyncio.create_task(credential_watchdog())
     scanner = TerminationScanner()
     asyncio.create_task(scanner.start())

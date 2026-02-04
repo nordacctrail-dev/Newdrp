@@ -1,18 +1,11 @@
-import json
+from DrissionPage import ChromiumPage, ChromiumOptions
 import time
-import re
+import json
 import os
-import utils  # CHANGED: Was 'import state'
+import utils # Merged Utils
 import config
 from utils import log
 from core.notifier import send_sync_message
-
-# Strictly using your stealth wrapper
-from sb_stealth_wrapper import StealthBot
-from sb_stealth_wrapper.strategies.input import HumanInputStrategy
-
-# 1. Force Headed Mode Env Vars
-os.environ["HEADLESS"] = "0"
 
 # Ensure debug directory exists
 if not os.path.exists("debug_data"):
@@ -20,140 +13,129 @@ if not os.path.exists("debug_data"):
         os.makedirs("debug_data")
     except: pass
 
-def update_cookies_and_tokens(bot):
-    """Snapshot cookies, tokens, AND User-Agent to RAM."""
+def get_browser():
+    """Initializes DrissionPage with anti-detect settings."""
+    co = ChromiumOptions()
+    
+    # Headless settings
+    if os.getenv("HEADLESS", "0") == "1":
+        co.headless(True)
+    else:
+        co.headless(False)
+    
+    co.set_argument('--disable-gpu')
+    co.mute(True) 
+    
+    return ChromiumPage(co)
+
+def update_state(page):
+    """Syncs Cookies, Token, and UA to global utils state."""
     try:
-        sb = bot.sb if hasattr(bot, 'sb') else bot
-        driver = getattr(bot, "driver", None) or sb.driver
-        
-        # Capture User-Agent if not already present
-        if not getattr(utils, "current_user_agent", None): # CHANGED: utils
-            try:
-                ua = driver.execute_script("return navigator.userAgent;")
-                if ua:
-                    utils.current_user_agent = ua # CHANGED: utils
-                    log(f"🕵️ Captured User-Agent: {ua[:30]}...", "INFO")
-            except: pass
+        # 1. User Agent
+        if not getattr(utils, "current_user_agent", None):
+            utils.current_user_agent = page.user_agent
+            log(f"🕵️ Captured UA: {utils.current_user_agent[:30]}...", "INFO")
 
-        # Capture Cookies via CDP
-        try:
-            cookie_data = driver.execute_cdp_cmd('Network.getCookies', {})
-            all_cookies = cookie_data.get('cookies', [])
-            simple_cookies = {c['name']: c['value'] for c in all_cookies if c.get('name') and c.get('value')}
-            
-            if simple_cookies:
-                utils.current_cookies = simple_cookies # CHANGED: utils
-        except:
-            # Fallback
-            c_list = driver.get_cookies()
-            utils.current_cookies = {c['name']: c['value'] for c in c_list} # CHANGED: utils
+        # 2. Cookies
+        cookies_list = page.cookies(as_dict=False)
+        simple_cookies = {c['name']: c['value'] for c in cookies_list}
+        if simple_cookies:
+            utils.current_cookies = simple_cookies
 
-        # Capture CSRF Token
+        # 3. CSRF Token
         try:
-            token = driver.execute_script("return document.querySelector('meta[name=\"csrf-token\"]').content")
-            if token:
-                utils.current_csrf_token = token # CHANGED: utils
+            meta = page.ele('css:meta[name="csrf-token"]')
+            if meta:
+                token = meta.attr('content')
+                if token:
+                    utils.current_csrf_token = token
         except: pass
 
     except Exception as e:
-        log(f"Cookie Sync Error: {e}", "WARN")
+        log(f"State Sync Error: {e}", "WARN")
 
-def check_and_solve_cloudflare(bot, target_url):
-    """Checks for Cloudflare title and waits."""
-    sb = bot.sb if hasattr(bot, 'sb') else bot
+def solve_cloudflare(page):
+    """Handles 'Just a moment...' check."""
     try:
-        sb.open(target_url)
-        time.sleep(3)
-        
-        title = sb.get_title()
-        if "Just a moment" in title or "Cloudflare" in title:
-            log("🛡️ Cloudflare Challenge Detected! Solving...", "WARN")
-            time.sleep(10) 
+        title = page.title.lower()
+        if "just a moment" in title or "cloudflare" in title:
+            log("🛡️ Cloudflare Challenge Detected...", "WARN")
+            time.sleep(5)
+            page.wait.load_start()
             
-            # Additional wait if still blocked
-            for _ in range(5):
-                if "Just a moment" not in sb.get_title():
-                    break
-                time.sleep(5)
-            log("✅ Cloudflare Passed (hopefully)", "OK")
+            if "just a moment" not in page.title.lower():
+                log("✅ Cloudflare Solved!", "OK")
+                return True
+            else:
+                log("⚠️ Still on Cloudflare...", "WARN")
+                return False
     except Exception as e:
-        log(f"CF Check Error: {e}", "ERROR")
+        log(f"CF Solver Error: {e}", "ERROR")
+    return True
 
-def login_sequence(bot):
-    """Performs login if not authenticated."""
-    sb = bot.sb if hasattr(bot, 'sb') else bot
-    
+def login_sequence(page):
+    """Handles Login."""
     try:
-        log("🔑 Starting Login Sequence...", "INFO")
-        sb.open(config.LOGIN_URL)
-        time.sleep(5)
+        log("🔑 Checking Login...", "INFO")
+        page.get(config.LOGIN_URL)
         
-        # Check if already logged in (redirected to dashboard/portal)
-        if "login" not in sb.get_current_url():
+        if "login" not in page.url:
             log("✅ Already Logged In", "OK")
             return True
 
-        # Type Email
-        sb.type('input[name="email"]', config.IVASMS_EMAIL)
-        time.sleep(1)
+        page.ele('name:email').input(config.IVASMS_EMAIL)
+        page.ele('name:password').input(config.IVASMS_PASSWORD)
+        page.ele('button[type="submit"]').click()
+        page.wait.load_start()
         
-        # Type Password
-        sb.type('input[name="password"]', config.IVASMS_PASSWORD)
-        time.sleep(1)
-        
-        # Click Login
-        sb.click('button[type="submit"]')
-        time.sleep(5)
-        
-        # Verify
-        if "login" not in sb.get_current_url():
+        if "login" not in page.url:
             log("✅ Login Successful", "OK")
             return True
         else:
-            log("❌ Login Failed (Still on login page)", "ERROR")
+            log("❌ Login Failed", "ERROR")
             return False
-            
+
     except Exception as e:
-        log(f"Login Error: {e}", "ERROR")
+        log(f"Login Exception: {e}", "ERROR")
         return False
 
 def browser_thread_target():
-    """Main Browser Loop."""
-    log("🚀 Starting Browser Thread...", "INFO")
+    """Main Loop."""
+    log("🚀 Starting Browser (DrissionPage)...", "INFO")
     
-    while not utils.shutdown_event.is_set(): # CHANGED: utils
-        try:
-            with StealthBot(headed=True) as bot:
-                sb = bot.sb if hasattr(bot, 'sb') else bot
-                try: sb.set_window_size(1920, 1080)
-                except: pass
+    page = None
+    try:
+        page = get_browser()
+        
+        if not login_sequence(page):
+            send_sync_message("❌ <b>Bot Login Failed</b>")
+        
+        while not utils.shutdown_event.is_set():
+            try:
+                update_state(page)
                 
-                if not login_sequence(bot):
-                    send_sync_message("❌ <b>Bot Login Failed - Retrying...</b>")
-                    time.sleep(5)
-                    continue 
+                # Check for External Signal (e.g. Scanner 403)
+                if utils.force_refresh_cookies:
+                    log("🚨 Signal: Force Refreshing Cookies...", "WARN")
+                    page.get(config.LIVE_SMS_URL)
+                    solve_cloudflare(page)
+                    update_state(page)
+                    utils.force_refresh_cookies = False
+                    log("✅ Cookies Refreshed.", "OK")
+                    send_sync_message("🔄 <b>Session Refreshed</b>")
 
-                while not utils.shutdown_event.is_set(): # CHANGED: utils
-                    time.sleep(5)
-                    update_cookies_and_tokens(bot)
+                if "login" in page.url:
+                    login_sequence(page)
 
-                    # --- CRITICAL FIX: WATCH FOR SIGNAL FROM API/WS ---
-                    if utils.force_refresh_cookies: # CHANGED: utils
-                        log("🚨 API/WS reported 403 - Solving Cloudflare...", "WARN")
-                        # Go to LIVE SMS to clear path for WebSocket credentials
-                        check_and_solve_cloudflare(bot, config.LIVE_SMS_URL)
-                        update_cookies_and_tokens(bot)
-                        
-                        utils.force_refresh_cookies = False # CHANGED: utils
-                        log("✅ Browser cleared Cloudflare.", "OK")
-                        
-                        cookie_json = json.dumps(utils.current_cookies, indent=2) # CHANGED: utils
-                        send_sync_message(f"🔄 <b>Cloudflare Solved !</b>\n<pre>{cookie_json}</pre>")
+                time.sleep(5)
 
-                    # Auto-Relogin check
-                    if "login" in sb.get_current_url():
-                        if not login_sequence(bot): break 
+            except Exception as loop_err:
+                log(f"Browser Loop Error: {loop_err}", "ERROR")
+                time.sleep(5)
 
-        except Exception as e:
-            log(f"💥 Browser Crashed: {e}", "ERROR")
-            time.sleep(5)
+    except Exception as e:
+        log(f"💥 Browser Process Crashed: {e}", "ERROR")
+    finally:
+        if page:
+            try: page.quit()
+            except: pass
