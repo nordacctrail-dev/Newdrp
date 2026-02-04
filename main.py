@@ -96,16 +96,34 @@ class IvasmsMultiBot(HandlerMixin, CallbackMixin, MenuMixin):
                     offset = u.update_id + 1
                     u_dict = u.model_dump(exclude_none=True)
                     
+                    # --- FIX: Safe Dictionary Mapping ---
                     if u.callback_query:
-                        u_dict["callback_query"]["message"]["chat"]["id"] = u.callback_query.message.chat.id
-                        u_dict["callback_query"]["message"]["message_id"] = u.callback_query.message.message_id
-                        u_dict["callback_query"]["from"]["id"] = u.callback_query.from_user.id
-                        u_dict["callback_query"]["data"] = u.callback_query.data
-                        u_dict["callback_query"]["id"] = u.callback_query.id
+                        cb = u.callback_query
+                        # Ensure keys exist
+                        if "message" not in u_dict["callback_query"]: u_dict["callback_query"]["message"] = {}
+                        if "chat" not in u_dict["callback_query"]["message"]: u_dict["callback_query"]["message"]["chat"] = {}
+                        if "from" not in u_dict["callback_query"]: u_dict["callback_query"]["from"] = {}
+
+                        u_dict["callback_query"]["message"]["chat"]["id"] = cb.message.chat.id
+                        u_dict["callback_query"]["message"]["message_id"] = cb.message.message_id
+                        u_dict["callback_query"]["from"]["id"] = cb.from_user.id
+                        u_dict["callback_query"]["data"] = cb.data
+                        u_dict["callback_query"]["id"] = cb.id
+                        
                     elif u.message:
-                        u_dict["message"]["chat"]["id"] = u.message.chat.id
-                        u_dict["message"]["from"]["id"] = u.message.from_user.id
-                        u_dict["message"]["text"] = u.message.text
+                        msg = u.message
+                        # Ensure keys exist
+                        if "message" not in u_dict: u_dict["message"] = {}
+                        if "chat" not in u_dict["message"]: u_dict["message"]["chat"] = {}
+                        
+                        u_dict["message"]["chat"]["id"] = msg.chat.id
+                        
+                        # SAFE CHECK: Only add 'from' if it exists
+                        if msg.from_user:
+                            if "from" not in u_dict["message"]: u_dict["message"]["from"] = {}
+                            u_dict["message"]["from"]["id"] = msg.from_user.id
+                        
+                        u_dict["message"]["text"] = msg.text
 
                     await self.handle_update(u_dict)
             except Exception as e:
@@ -118,11 +136,11 @@ class IvasmsMultiBot(HandlerMixin, CallbackMixin, MenuMixin):
         
         logging.info(f"👨‍💻 Spawning Worker: {email}")
         
-        # --- FIXED: Added notification_callback ---
+        # Pass the callback for OTP distribution
         worker = IvasmsWorker(email, password, notification_callback=self.distribute_otp)
         self.workers[email] = worker
         
-        # --- FIXED: Changed start_browser() to start() ---
+        # Start Worker
         asyncio.create_task(worker.start())
 
     async def kill_worker(self, email):
