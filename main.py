@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-from aiogram import Bot, Dispatcher
+from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
@@ -96,10 +96,9 @@ class IvasmsMultiBot(HandlerMixin, CallbackMixin, MenuMixin):
                     offset = u.update_id + 1
                     u_dict = u.model_dump(exclude_none=True)
                     
-                    # --- FIX: Safe Dictionary Mapping ---
+                    # Safe Update Handling
                     if u.callback_query:
                         cb = u.callback_query
-                        # Ensure keys exist
                         if "message" not in u_dict["callback_query"]: u_dict["callback_query"]["message"] = {}
                         if "chat" not in u_dict["callback_query"]["message"]: u_dict["callback_query"]["message"]["chat"] = {}
                         if "from" not in u_dict["callback_query"]: u_dict["callback_query"]["from"] = {}
@@ -112,13 +111,11 @@ class IvasmsMultiBot(HandlerMixin, CallbackMixin, MenuMixin):
                         
                     elif u.message:
                         msg = u.message
-                        # Ensure keys exist
                         if "message" not in u_dict: u_dict["message"] = {}
                         if "chat" not in u_dict["message"]: u_dict["message"]["chat"] = {}
                         
                         u_dict["message"]["chat"]["id"] = msg.chat.id
                         
-                        # SAFE CHECK: Only add 'from' if it exists
                         if msg.from_user:
                             if "from" not in u_dict["message"]: u_dict["message"]["from"] = {}
                             u_dict["message"]["from"]["id"] = msg.from_user.id
@@ -135,12 +132,10 @@ class IvasmsMultiBot(HandlerMixin, CallbackMixin, MenuMixin):
         if email in self.workers: return
         
         logging.info(f"👨‍💻 Spawning Worker: {email}")
-        
-        # Pass the callback for OTP distribution
         worker = IvasmsWorker(email, password, notification_callback=self.distribute_otp)
         self.workers[email] = worker
         
-        # Start Worker
+        # Start Worker Services
         asyncio.create_task(worker.start())
 
     async def kill_worker(self, email):
@@ -153,40 +148,59 @@ class IvasmsMultiBot(HandlerMixin, CallbackMixin, MenuMixin):
                 try: w.driver.quit()
                 except: pass
 
-    # ====================================================
-    # 📨 OTP DISTRIBUTOR
-    # ====================================================
     async def distribute_otp(self, account_email, otp_data):
-        """
-        Called by Worker when an OTP arrives.
-        Broadcasts it to all users with permission.
-        """
+        """Broadcasts OTP to allowed users."""
         logging.info(f"🔔 Distributing OTP for {account_email}")
         
-        # 1. Get all users
         all_users = await self.db.get_all_users()
         recipients = set()
         
-        # 2. Always include Owner
         if self.cfg.OWNER_ID != 0:
             recipients.add(self.cfg.OWNER_ID)
 
-        # 3. Check permissions
         for user in all_users:
             uid = user['chat_id']
             perms = user.get('permissions', [])
             if account_email in perms:
                 recipients.add(uid)
 
-        # 4. Format Message
         msg_text = Notifier.format_otp_message(otp_data)
 
-        # 5. Send
         for chat_id in recipients:
             try:
                 await self.bot.send_to_chat(chat_id, msg_text)
             except Exception as e:
                 logging.error(f"Failed to send OTP to {chat_id}: {e}")
+
+    # ====================================================
+    # 🔗 HELPER METHODS (These were missing!)
+    # ====================================================
+    async def get_visible_emails(self, user_id):
+        """Returns list of emails the user is allowed to see."""
+        if user_id == self.cfg.OWNER_ID:
+            return list(self.workers.keys())
+        
+        user = await self.db.get_user(user_id)
+        if not user: return []
+        
+        perms = user.get("permissions", [])
+        return [e for e in perms if e in self.workers]
+
+    def get_account_alias(self, target_email, visible_emails, user_id, is_admin):
+        """Returns a display name for an account."""
+        # Owner sees full email
+        if user_id == self.cfg.OWNER_ID:
+            return target_email
+        
+        # Admins/Users see "Account 1", "Account 2" for privacy/simplicity
+        try:
+            sorted_emails = sorted(visible_emails)
+            if target_email in sorted_emails:
+                index = sorted_emails.index(target_email)
+                return f"Account {index + 1}"
+            return target_email
+        except:
+            return "Unknown Account"
 
 if __name__ == "__main__":
     try:
