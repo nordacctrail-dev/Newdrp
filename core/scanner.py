@@ -5,9 +5,9 @@ import re
 import time
 from urllib.parse import urlencode
 
-import state
+import utils  # Merged State + Utils
 import config
-import core.database as db
+from core.database import db  # Database Instance
 from utils import log
 
 # ===================== PARSING LOGIC =====================
@@ -41,7 +41,7 @@ def find_json_array_in_text(text: str):
     parsed = try_json(substr)
     if isinstance(parsed, list): return parsed
     
-    # Fallback: Try finding the closing bracket
+    # Fallback: Try finding the closing bracket if data is messy
     last = substr.rfind("]")
     if last != -1:
         cand = substr[: last + 1]
@@ -79,7 +79,7 @@ def extract_termid_from_payload(payload):
     return None
 
 def extract_cli_from_payload(payload):
-    """Extracts the Service Name."""
+    """Extracts the Service Name (e.g., 'ZAMBIA 716')."""
     if isinstance(payload, dict):
         if "termination_name" in payload and payload["termination_name"]:
             return str(payload["termination_name"]).strip()
@@ -107,7 +107,7 @@ class TerminationScanner:
         self.ws_url = "wss://ivasms.com:2087/socket.io/" 
         self.is_running = False
         
-        # Categorization regex
+        # Categorization regex for grouping in the UI
         self.service_patterns = {
             "Facebook": r"facebook|fb\b",
             "WhatsApp": r"whatsapp",
@@ -127,7 +127,7 @@ class TerminationScanner:
         self.is_running = True
         log("📡 Scanner Started (Port 2087)", "INFO")
 
-        while self.is_running and not state.shutdown_event.is_set():
+        while self.is_running and not utils.shutdown_event.is_set():
             # Connection Params (EIO=4, transport=websocket)
             params = {'EIO': '4', 'transport': 'websocket'}
             url = f"{self.ws_url}?{urlencode(params)}"
@@ -136,17 +136,17 @@ class TerminationScanner:
             headers["Host"] = "ivasms.com:2087"
             headers["Origin"] = "https://www.ivasms.com"
             
-            # Use captured session if available
-            if state.current_cookies:
-                cookie_str = "; ".join([f"{k}={v}" for k,v in state.current_cookies.items()])
+            # Use captured session from browser if available
+            if utils.current_cookies:
+                cookie_str = "; ".join([f"{k}={v}" for k,v in utils.current_cookies.items()])
                 headers["Cookie"] = cookie_str
-            if getattr(state, "current_user_agent", None):
-                headers["User-Agent"] = state.current_user_agent
+            if getattr(utils, "current_user_agent", None):
+                headers["User-Agent"] = utils.current_user_agent
 
             try:
                 async with aiohttp.ClientSession() as client:
                     async with client.ws_connect(url, headers=headers, ssl=False, timeout=20) as ws:
-                        # 1. Send Handshake
+                        # 1. Send Handshake (Strictly required by Socket.IO)
                         await ws.send_str("40") 
                         log("📡 Scanner Connected", "OK")
                         
@@ -158,10 +158,11 @@ class TerminationScanner:
                                 break
 
             except Exception as e:
-                # If 403, Cloudflare might be blocking the scanner too
+                # If 403, it means Cloudflare is blocking the Scanner.
+                # We signal the Browser Thread to solve the captcha.
                 if "403" in str(e):
                     log(f"📡 Scanner 403 Forbidden. Signaling Browser...", "WARN")
-                    state.force_refresh_cookies = True
+                    utils.force_refresh_cookies = True
                 
                 await asyncio.sleep(5)
 
@@ -173,31 +174,34 @@ class TerminationScanner:
 
         if text.startswith("42"):
             try:
+                # Use robust extractor
                 data_arr = find_json_array_in_text(text)
                 
+                # We expect: ["send_message_test", {DATA}]
                 if data_arr and len(data_arr) > 1:
                     event_name = data_arr[0]
                     if event_name == "send_message_test":
                         await self._process_payload(data_arr[1])
                         
                 elif data_arr and len(data_arr) > 0:
+                    # Fallback for weird frames
                     await self._process_payload(data_arr[0])
             except: 
                 pass
 
     async def _process_payload(self, payload: dict):
         """
-        Extracts ID and Name, updates Database.
+        Extracts ID and Name, updates Database Leaderboard.
         """
         # 1. Extract ID (Critical)
         term_id = extract_termid_from_payload(payload)
         if not term_id: return
 
         # 2. Extract Name & Message
-        raw_name = extract_cli_from_payload(payload)   # e.g. "ZAMBIA 716"
+        raw_name = extract_cli_from_payload(payload)   # e.g. "ZAMBIA 716" or "Huawei"
         msg_text = extract_message_from_payload(payload)
         
-        # 3. Categorize
+        # 3. Categorize (e.g. "Huawei" -> "Other", "Apple" -> "Apple")
         detected_service = "Other"
         combined_text = f"{raw_name} {msg_text}"
         
@@ -206,9 +210,8 @@ class TerminationScanner:
                 detected_service = service
                 break
         
-        # Display Name Logic
+        # Display Name Logic: Prefer detected service if found, else raw name
         display_name = raw_name if raw_name else "Unknown Range"
 
-        # 4. Save to MongoDB
-        # Using the new db module
-        await db.db.record_scanner_hit(term_id, display_name, detected_service)
+        # 4. Save to MongoDB (This populates the "Add Range" menu)
+        await db.record_scanner_hit(term_id, display_name, detected_service)
