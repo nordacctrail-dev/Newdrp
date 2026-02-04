@@ -10,8 +10,10 @@ from aiogram.types import (
 class HandlerMixin:
     """
     Handles all Telegram updates (Messages, Commands).
+    Delegates Callbacks to CallbackMixin.
     """
     
+    # State tracking for multi-step inputs (like Adding Numbers)
     user_states = {}
 
     async def handle_update(self, u):
@@ -30,7 +32,7 @@ class HandlerMixin:
                 msg = u["message"]
                 cid = msg["chat"]["id"]
                 
-                # --- SAFE TEXT EXTRACTION ---
+                # --- SAFE TEXT EXTRACTION (Fixes Crash) ---
                 raw_text = msg.get("text")
                 txt = raw_text.strip() if raw_text else ""
                 
@@ -40,7 +42,7 @@ class HandlerMixin:
                 username = user.get("username", "")
                 reply_to = msg.get("reply_to_message")
                 
-                # Update Identity
+                # Update Identity in DB
                 if txt == "/start":
                     await self.db.update_identity(user_id, first_name, username)
 
@@ -51,6 +53,7 @@ class HandlerMixin:
                 is_admin = is_owner or (user_data and user_data.get("is_admin", False))
                 is_authorized = is_owner or (user_data is not None)
 
+                # Initialize Owner if missing
                 if is_owner and not user_data:
                     user_data = {"permissions": [], "allowed_dids": [], "is_admin": True}
 
@@ -59,7 +62,7 @@ class HandlerMixin:
                      return
 
                 # ====================================================
-                # 🖥️ MAIN DASHBOARD
+                # 🖥️ MAIN DASHBOARD (Start Menu)
                 # ====================================================
                 if txt == "/start" or txt == "/menu" or txt == "🔙 Back to Main Menu":
                     
@@ -86,20 +89,30 @@ class HandlerMixin:
 
                 # --- 🟢 VIEWING ---
                 elif txt == "📋 All Numbers":
+                    visible_emails = await self.get_visible_emails(user_id)
+                    
+                    if not visible_emails:
+                        await self.bot.send_to_chat(cid, "❌ <b>No accounts assigned.</b>\nAsk an admin to give you access.")
+                        return
+
                     ack = await self.bot.send_to_chat(cid, "🔄 <i>Fetching numbers...</i>")
                     mid = ack["result"]["message_id"]
                     
-                    visible_emails = await self.get_visible_emails(user_id)
                     tasks = [self.workers[e].sync_numbers() for e in visible_emails if self.workers.get(e)]
                     if tasks: await asyncio.gather(*tasks)
                     
                     await self.render_global_numbers(cid, mid, 0, user_id, user_data, is_owner)
 
                 elif txt == "🔢 Choose Number":
+                    visible_emails = await self.get_visible_emails(user_id)
+                    
+                    if not visible_emails:
+                        await self.bot.send_to_chat(cid, "❌ <b>No accounts assigned.</b>")
+                        return
+
                     ack = await self.bot.send_to_chat(cid, "🔄 <i>Loading ranges...</i>")
                     mid = ack["result"]["message_id"]
                     
-                    visible_emails = await self.get_visible_emails(user_id)
                     tasks = [self.workers[e].sync_numbers() for e in visible_emails if self.workers.get(e)]
                     if tasks: await asyncio.gather(*tasks)
 
@@ -114,6 +127,7 @@ class HandlerMixin:
                         await self.bot.send_to_chat(cid, "❌ No accounts assigned.")
                         return
 
+                    # Smart Jump: If only 1 account, skip the selection menu
                     if len(visible_emails) == 1:
                         email = visible_emails[0]
                         self.user_states[user_id] = {
@@ -127,14 +141,26 @@ class HandlerMixin:
 
                 elif txt == "➖ Remove Number":
                     if not is_admin: return
+                    visible_emails = await self.get_visible_emails(user_id)
+                    if not visible_emails:
+                        await self.bot.send_to_chat(cid, "❌ No authorized accounts.")
+                        return
                     await self.show_remove_menu(cid, None, user_id, is_admin)
 
                 # --- 🔵 UTILITIES ---
                 elif txt == "📂 Export":
+                    visible_emails = await self.get_visible_emails(user_id)
+                    if not visible_emails:
+                        await self.bot.send_to_chat(cid, "❌ No authorized accounts.")
+                        return
                     await self.show_main_export_menu(cid, None, user_id, user_data, is_admin)
 
                 elif txt == "📜 History":
                     visible_emails = await self.get_visible_emails(user_id)
+                    if not visible_emails:
+                        await self.bot.send_to_chat(cid, "❌ <b>No accounts assigned.</b>")
+                        return
+
                     history_text = "<b>📜 Recent OTP History</b>\n\n"
                     found_any = False
 
@@ -159,7 +185,6 @@ class HandlerMixin:
                         await self.bot.send_to_chat(cid, "⛔ <b>Owner Only.</b>")
                         return
                     
-                    # NEW: Reply Keyboard for Admin Menu
                     rows = [
                         [KeyboardButton(text="👤 User Settings"), KeyboardButton(text="📧 Account Settings")],
                         [KeyboardButton(text="🔑 Assign Access"), KeyboardButton(text="🔙 Back to Main Menu")]
@@ -168,7 +193,7 @@ class HandlerMixin:
                     
                     await self.bot.send_to_chat(cid, "<b>🔐 Admin Panel</b>\nSelect an option:", reply_markup=kb)
 
-                # --- 🔴 Admin Sub-Menus (Triggered by the Reply Keyboard above) ---
+                # --- 🔴 Admin Sub-Menus ---
                 elif txt == "👤 User Settings":
                     if not is_owner: return
                     users = await self.db.get_all_users()
@@ -178,7 +203,6 @@ class HandlerMixin:
                         kb_rows.append([InlineKeyboardButton(text=f"👤 {u.get('name','User')} ({u['chat_id']})", callback_data=f"perm:sel_usr:{u['chat_id']}")])
                     
                     kb_rows.append([InlineKeyboardButton(text="➕ Add User by ID", callback_data="usr:add")])
-                    # No back button needed here since they have the Reply Keyboard
                     markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
                     await self.bot.send_to_chat(cid, "<b>👤 User Management</b>\nSelect user to edit:", reply_markup=markup)
 
@@ -187,31 +211,26 @@ class HandlerMixin:
                     accounts = await self.db.get_all_accounts()
                     kb_rows = [[InlineKeyboardButton(text=f"🗑 {a['email']}", callback_data=f"acc:del:{a['email']}")] for a in accounts]
                     kb_rows.append([InlineKeyboardButton(text="➕ Add Account", callback_data="acc:add")])
-                    
                     markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
                     await self.bot.send_to_chat(cid, "<b>📧 Account Settings</b>\nClick to delete:", reply_markup=markup)
 
                 elif txt == "🔑 Assign Access":
-                    # Re-uses the user list logic but framed as permissions
-                    # For simplicity, we just trigger the user selection list again, 
-                    # as clicking a user in "User Settings" allows assigning access anyway.
                     if not is_owner: return
                     users = await self.db.get_all_users()
                     kb_rows = []
                     for u in users:
                         if u['chat_id'] == self.cfg.OWNER_ID: continue
                         kb_rows.append([InlineKeyboardButton(text=f"🔑 {u.get('name','User')}", callback_data=f"perm:sel_usr:{u['chat_id']}")])
-                    
                     markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
                     await self.bot.send_to_chat(cid, "<b>🔑 Assign Access</b>\nSelect user to manage permissions:", reply_markup=markup)
 
                 # ====================================================
-                # 5. INPUT HANDLING
+                # 5. INPUT HANDLING (Forms)
                 # ====================================================
                 elif user_id in self.user_states:
                     await self.handle_state_input(cid, txt, user_id, user_data, is_owner)
                 
-                # --- Quick Setup Helpers ---
+                # --- Quick Setup Helpers (Reply Logic) ---
                 elif reply_to and "text" in reply_to:
                     reply_text = reply_to["text"]
                     
@@ -236,6 +255,7 @@ class HandlerMixin:
         except Exception as e:
             logging.error(f"Handler Error: {e}", exc_info=True)
 
+    # Helper for the Add Number Input Flow
     async def handle_state_input(self, cid, txt, user_id, user_data, is_owner):
         if txt.lower() in ["/cancel", "cancel", "exit"]:
             del self.user_states[user_id]
