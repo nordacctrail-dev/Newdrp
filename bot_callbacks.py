@@ -1,5 +1,6 @@
 import logging
 import asyncio
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 from utils import ExportManager, CountryManager
 
 class CallbackMixin:
@@ -12,12 +13,17 @@ class CallbackMixin:
 
     async def handle_callback(self, u):
         try:
+            # Safe extraction for aiogram v3 structure
             cb = u["callback_query"]
-            cid = cb["message"]["chat"]["id"]
-            data = cb["data"]
-            mid = cb["message"]["message_id"]
-            user_id = cb["from"]["id"]
+            msg = cb.get("message", {})
+            cid = msg.get("chat", {}).get("id")
+            mid = msg.get("message_id")
+            data = cb.get("data")
+            from_user = cb.get("from", {})
+            user_id = from_user.get("id")
             
+            if not cid or not data: return
+
             # --- AUTH CHECK ---
             is_owner = (user_id == self.cfg.OWNER_ID)
             user_data = await self.db.get_user(user_id)
@@ -30,16 +36,13 @@ class CallbackMixin:
                 await self.show_main_export_menu(cid, mid, user_id, user_data, is_admin)
 
             elif data == "exp:combined":
-                # Download ALL numbers available to this user
                 await self.bot.edit_msg(cid, mid, "🔄 <i>Preparing file...</i>")
                 visible_emails = await self.get_visible_emails(user_id)
                 
-                # Gather data from all workers
                 all_nums = []
                 for e in visible_emails:
                     w = self.workers.get(e)
                     if w:
-                        # Ensure data is fresh
                         if not w.all_numbers: await w.sync_numbers()
                         all_nums.extend(w.all_numbers)
                 
@@ -47,6 +50,7 @@ class CallbackMixin:
                     await self.bot.edit_msg(cid, mid, "❌ No numbers found.")
                 else:
                     path = ExportManager.generate(all_nums, "All_Numbers")
+                    # FIX: Use FSInputFile for local files
                     await self.bot.send_file(cid, path, f"<b>📤 Export Ready</b>\nCount: {len(all_nums)}")
                     await self.bot.delete_msg(cid, mid)
 
@@ -57,7 +61,6 @@ class CallbackMixin:
                 ctry = data.split(":", 2)[2]
                 await self.bot.edit_msg(cid, mid, f"⏳ <i>Exporting {ctry}...</i>")
                 
-                # Filter by country across all allowed accounts
                 perms = [] if is_owner else user_data.get("permissions", [])
                 countries = self.get_combined_countries(user_id, perms, is_admin)
                 nums = countries.get(ctry, [])
@@ -79,7 +82,6 @@ class CallbackMixin:
                 await self.show_country_selection(cid, mid, user_id, "nav", is_admin)
                 
             elif data.startswith("nav:view_ctry:"):
-                # Pagination for Country View
                 parts = data.split(":")
                 ctry = parts[2]
                 page = int(parts[3])
@@ -93,24 +95,25 @@ class CallbackMixin:
                 
                 text = f"🌎 <b>{ctry}</b> (Page {page+1}/{total_p})\n" + "\n".join([f"• <code>{n}</code>" for n in chunk])
                 
-                # Navigation Buttons
-                btns = []
                 nav_row = []
-                if page > 0: nav_row.append({"text": "⬅️", "callback_data": f"nav:view_ctry:{ctry}:{page-1}"})
-                if page < total_p - 1: nav_row.append({"text": "➡️", "callback_data": f"nav:view_ctry:{ctry}:{page+1}"})
-                if nav_row: btns.append(nav_row)
-                btns.append([{"text": "🔙 Back", "callback_data": "nav:ctry_menu"}])
+                if page > 0: 
+                    nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"nav:view_ctry:{ctry}:{page-1}"))
+                if page < total_p - 1: 
+                    nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"nav:view_ctry:{ctry}:{page+1}"))
                 
-                await self.bot.edit_msg(cid, mid, text, {"inline_keyboard": btns})
+                rows = []
+                if nav_row: rows.append(nav_row)
+                rows.append([InlineKeyboardButton(text="🔙 Back", callback_data="nav:ctry_menu")])
+                
+                markup = InlineKeyboardMarkup(inline_keyboard=rows)
+                await self.bot.edit_msg(cid, mid, text, reply_markup=markup)
 
             # ====================================================
-            # 3. ADD NUMBER SETUP (Select Account)
+            # 3. ADD NUMBER SETUP
             # ====================================================
             elif data.startswith("add:sel:"):
-                # User selected a specific account folder -> Start Input
                 email = data.split(":")[2]
                 from bot_handlers import HandlerMixin
-                # Inject state into HandlerMixin
                 HandlerMixin.user_states[user_id] = {
                     "action": "add_number",
                     "target": [email],
@@ -123,84 +126,101 @@ class CallbackMixin:
             # 4. ADMIN PANEL ACTIONS (Owner Only)
             # ====================================================
             elif data == "usr:main":
-                # List users to manage
                 users = await self.db.get_all_users()
-                kb = []
+                kb_rows = []
                 for u in users:
                     if u['chat_id'] == self.cfg.OWNER_ID: continue
-                    kb.append([{"text": f"👤 {u.get('name','User')} ({u['chat_id']})", "callback_data": f"perm:sel_usr:{u['chat_id']}"}])
+                    kb_rows.append([InlineKeyboardButton(text=f"👤 {u.get('name','User')} ({u['chat_id']})", callback_data=f"perm:sel_usr:{u['chat_id']}")])
                 
-                kb.append([{"text": "➕ Add User by ID", "callback_data": "usr:add"}])
-                kb.append([{"text": "🔙 Close", "callback_data": "menu_close"}])
-                await self.bot.edit_msg(cid, mid, "<b>👤 User Management</b>\nSelect user to edit:", {"inline_keyboard": kb})
+                kb_rows.append([InlineKeyboardButton(text="➕ Add User by ID", callback_data="usr:add")])
+                kb_rows.append([InlineKeyboardButton(text="🔙 Close", callback_data="menu_close")])
+                
+                markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+                await self.bot.edit_msg(cid, mid, "<b>👤 User Management</b>\nSelect user to edit:", reply_markup=markup)
 
             elif data == "usr:add":
-                await self.bot.api("sendMessage", {"chat_id": cid, "text": "✏️ <b>Enter Telegram User ID:</b>", "reply_markup": {"force_reply": True}})
+                # Force Reply is a bit different, sending a standard msg with reply_markup
+                await self.bot.api("sendMessage", {
+                    "chat_id": cid, 
+                    "text": "✏️ <b>Enter Telegram User ID:</b>", 
+                    "reply_markup": {"force_reply": True}
+                })
 
             elif data == "acc:main":
-                # List accounts to delete
                 accounts = await self.db.get_all_accounts()
-                kb = [[{"text": f"🗑 {a['email']}", "callback_data": f"acc:del:{a['email']}"}] for a in accounts]
-                kb.append([{"text": "➕ Add Account", "callback_data": "acc:add"}])
-                kb.append([{"text": "🔙 Close", "callback_data": "menu_close"}])
-                await self.bot.edit_msg(cid, mid, "<b>📧 Account Settings</b>\nClick to delete:", {"inline_keyboard": kb})
+                kb_rows = [[InlineKeyboardButton(text=f"🗑 {a['email']}", callback_data=f"acc:del:{a['email']}")] for a in accounts]
+                kb_rows.append([InlineKeyboardButton(text="➕ Add Account", callback_data="acc:add")])
+                kb_rows.append([InlineKeyboardButton(text="🔙 Close", callback_data="menu_close")])
+                
+                markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+                await self.bot.edit_msg(cid, mid, "<b>📧 Account Settings</b>\nClick to delete:", reply_markup=markup)
 
             elif data == "acc:add":
-                await self.bot.api("sendMessage", {"chat_id": cid, "text": "✏️ <b>Enter:</b> <code>email:password</code>", "parse_mode": "HTML", "reply_markup": {"force_reply": True}})
+                await self.bot.api("sendMessage", {
+                    "chat_id": cid, 
+                    "text": "✏️ <b>Enter:</b> <code>email:password</code>", 
+                    "parse_mode": "HTML", 
+                    "reply_markup": {"force_reply": True}
+                })
 
             elif data.startswith("acc:del:"):
                 email = data.split(":")[2]
                 await self.kill_worker(email)
                 await self.db.remove_account(email)
                 await self.bot.api("answerCallbackQuery", {"callback_query_id": cb["id"], "text": "✅ Deleted!"})
-                # Refresh menu
-                await self.handle_callback({**u, "callback_query": {**cb, "data": "acc:main"}})
+                # Refresh menu recursively
+                new_u = u.copy()
+                new_u["callback_query"]["data"] = "acc:main"
+                await self.handle_callback(new_u)
 
             # ====================================================
             # 5. PERMISSION MANAGEMENT (Owner Only)
             # ====================================================
             elif data.startswith("perm:sel_usr:"):
-                # Show permissions for a specific user
                 target_id = int(data.split(":")[2])
                 user = await self.db.get_user(target_id)
                 accounts = await self.db.get_all_accounts()
                 
-                kb = []
+                kb_rows = []
                 # Admin Toggle
                 is_adm = user.get("is_admin", False)
                 adm_text = "🔴 Make Admin" if not is_adm else "🟢 Is Admin (Demote)"
-                kb.append([{"text": adm_text, "callback_data": f"perm:toggle_admin:{target_id}"}])
+                kb_rows.append([InlineKeyboardButton(text=adm_text, callback_data=f"perm:toggle_admin:{target_id}")])
                 
                 # Account Toggles
                 current_perms = user.get("permissions", [])
                 for acc in accounts:
                     has_access = acc["email"] in current_perms
                     icon = "✅" if has_access else "❌"
-                    kb.append([{"text": f"{icon} {acc['email']}", "callback_data": f"perm:tgl:{target_id}:{acc['email']}"}])
+                    kb_rows.append([InlineKeyboardButton(text=f"{icon} {acc['email']}", callback_data=f"perm:tgl:{target_id}:{acc['email']}")])
                 
-                kb.append([{"text": "🔙 Back", "callback_data": "usr:main"}])
-                await self.bot.edit_msg(cid, mid, f"🔑 <b>Permissions: {target_id}</b>", {"inline_keyboard": kb})
+                kb_rows.append([InlineKeyboardButton(text="🔙 Back", callback_data="usr:main")])
+                markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+                await self.bot.edit_msg(cid, mid, f"🔑 <b>Permissions: {target_id}</b>", reply_markup=markup)
 
             elif data.startswith("perm:tgl:"):
                 parts = data.split(":")
                 tid, email = int(parts[2]), parts[3]
                 await self.db.toggle_permission(tid, email)
-                # Refresh UI
-                await self.handle_callback({**u, "callback_query": {**cb, "data": f"perm:sel_usr:{tid}"}})
+                
+                new_u = u.copy()
+                new_u["callback_query"]["data"] = f"perm:sel_usr:{tid}"
+                await self.handle_callback(new_u)
 
             elif data.startswith("perm:toggle_admin:"):
                 tid = int(data.split(":")[2])
                 user = await self.db.get_user(tid)
                 curr = user.get("is_admin", False)
                 await self.db.set_admin_status(tid, not curr)
-                # Refresh UI
-                await self.handle_callback({**u, "callback_query": {**cb, "data": f"perm:sel_usr:{tid}"}})
+                
+                new_u = u.copy()
+                new_u["callback_query"]["data"] = f"perm:sel_usr:{tid}"
+                await self.handle_callback(new_u)
 
             # Close Handler
             elif data == "menu_close":
                 await self.bot.delete_msg(cid, mid)
 
-            # Always answer the callback to stop the loading animation
             await self.bot.api("answerCallbackQuery", {"callback_query_id": cb["id"]})
 
         except Exception as e:

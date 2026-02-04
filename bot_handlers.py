@@ -1,7 +1,11 @@
 import asyncio
 import logging
-import re
-from utils import fmt_num, ExportManager
+from aiogram.types import (
+    ReplyKeyboardMarkup, 
+    KeyboardButton, 
+    InlineKeyboardMarkup, 
+    InlineKeyboardButton
+)
 
 class HandlerMixin:
     """
@@ -9,7 +13,6 @@ class HandlerMixin:
     Delegates Callbacks to CallbackMixin.
     """
     
-    # State tracking for text inputs
     user_states = {}
 
     async def handle_update(self, u):
@@ -22,14 +25,13 @@ class HandlerMixin:
                 return
 
             # ====================================================
-            # 2. MESSAGE HANDLER (Text & Commands)
+            # 2. MESSAGE HANDLER
             # ====================================================
             if "message" in u:
                 msg = u["message"]
                 cid = msg["chat"]["id"]
                 
-                # --- FIX: Safe Text Extraction ---
-                # If msg["text"] is None (photo/sticker), default to ""
+                # --- SAFE TEXT EXTRACTION (Prevents Crash) ---
                 raw_text = msg.get("text")
                 txt = raw_text.strip() if raw_text else ""
                 
@@ -59,26 +61,32 @@ class HandlerMixin:
                      return
 
                 # ====================================================
-                # 🖥️ HYBRID DASHBOARD (THE MAIN MENU)
+                # 🖥️ MAIN DASHBOARD (Reply Keyboard)
                 # ====================================================
                 if txt == "/start" or txt == "/menu" or txt == "🔙 Back to Main Menu":
                     
-                    kb = [
-                        [{"text": "📋 All Numbers"}, {"text": "🔢 Choose Number"}]
+                    # Row 1
+                    rows = [
+                        [KeyboardButton(text="📋 All Numbers"), KeyboardButton(text="🔢 Choose Number")]
                     ]
                     
+                    # Row 2 (Admin Only)
                     if is_admin:
-                        kb.append([{"text": "➕ Add Number"}, {"text": "➖ Remove Number"}])
+                        rows.append([KeyboardButton(text="➕ Add Number"), KeyboardButton(text="➖ Remove Number")])
                     
-                    kb.append([{"text": "📂 Export"}, {"text": "📜 History"}])
+                    # Row 3
+                    rows.append([KeyboardButton(text="📂 Export"), KeyboardButton(text="📜 History")])
                     
+                    # Row 4 (Owner Only)
                     if is_owner:
-                        kb.append([{"text": "🔐 Admin Panel"}])
+                        rows.append([KeyboardButton(text="🔐 Admin Panel")])
+
+                    kb = ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
                     await self.bot.send_to_chat(
                         cid, 
                         "👋 <b>IVASMS Dashboard</b>\nSelect an option below:", 
-                        {"keyboard": kb, "resize_keyboard": True}
+                        reply_markup=kb
                     )
                     return
 
@@ -159,23 +167,22 @@ class HandlerMixin:
                         await self.bot.send_to_chat(cid, "⛔ <b>Owner Only.</b>")
                         return
                     
-                    kb = {
-                        "inline_keyboard": [
-                            [{"text": "👤 User Settings", "callback_data": "usr:main"}, 
-                             {"text": "📧 Account Settings", "callback_data": "acc:main"}], 
-                            [{"text": "🔑 Assign Access", "callback_data": "perm:main"}]
-                        ]
-                    }
-                    await self.bot.send_to_chat(cid, "<b>🔐 Owner Control Panel</b>\nManage your team and accounts:", kb)
+                    # FIXED: Using proper InlineKeyboardMarkup object
+                    kb = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text="👤 User Settings", callback_data="usr:main"), 
+                         InlineKeyboardButton(text="📧 Account Settings", callback_data="acc:main")], 
+                        [InlineKeyboardButton(text="🔑 Assign Access", callback_data="perm:main")]
+                    ])
+                    
+                    await self.bot.send_to_chat(cid, "<b>🔐 Owner Control Panel</b>\nManage your team and accounts:", reply_markup=kb)
 
                 # ====================================================
-                # 5. INPUT HANDLING (Forms)
+                # 5. INPUT HANDLING
                 # ====================================================
                 elif user_id in self.user_states:
                     await self.handle_state_input(cid, txt, user_id, user_data, is_owner)
                 
                 # --- Quick Setup Helpers ---
-                # Check reply_to first to ensure it exists
                 elif reply_to and "text" in reply_to:
                     reply_text = reply_to["text"]
                     
@@ -200,7 +207,6 @@ class HandlerMixin:
         except Exception as e:
             logging.error(f"Handler Error: {e}", exc_info=True)
 
-    # Helper for the Add Number Input Flow
     async def handle_state_input(self, cid, txt, user_id, user_data, is_owner):
         if txt.lower() in ["/cancel", "cancel", "exit"]:
             del self.user_states[user_id]
@@ -235,12 +241,9 @@ class HandlerMixin:
                 targets = state.get("target", [])
                 term_names = state.get("term_names", [])
                 
-                # Note: We need to define execute_add_process or call worker logic here
-                # For this snippet, assuming worker.add_numbers is called directly or mapped
                 asyncio.create_task(self.execute_add_process(cid, count, term_names, targets))
                 del self.user_states[user_id]
 
-    # Added helper to link back to worker logic
     async def execute_add_process(self, cid, count, term_names, targets):
         status_msg = await self.bot.send_to_chat(cid, "⏳ Starting...")
         msg_id = status_msg["result"]["message_id"]
@@ -252,12 +255,10 @@ class HandlerMixin:
                 report.append(f"❌ {email}: Offline")
                 continue
                 
-            # Define a progress callback for the worker
             async def progress(idx, total, txt):
-                if idx % 5 == 0: # Update every 5 items to avoid spam
+                if idx % 5 == 0: 
                     await self.bot.edit_msg(cid, msg_id, f"🔄 {email}: {idx}/{total}\n{txt}")
 
-            # Loop Logic
             total_added = 0
             for i in range(count):
                 res = await w.add_numbers(term_names, progress_callback=progress)
