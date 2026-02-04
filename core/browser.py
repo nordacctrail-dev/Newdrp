@@ -108,7 +108,7 @@ def login_sequence(bot):
         
         # Send JSON with Cookies + UA
         cookie_json = json.dumps(state.current_cookies, indent=2)
-        send_sync_message(f"✅ <b>Session Resumed</b>\n<pre>{json.dumps(payload, indent=2)}</pre>")
+        send_sync_message(f"✅ <b>Login Successful! </b>\n<pre>{cookie_json}</pre>")
         return True
 
     if not sb.is_element_visible("#card-email"):
