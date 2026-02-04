@@ -10,7 +10,6 @@ from aiogram.types import (
 class HandlerMixin:
     """
     Handles all Telegram updates (Messages, Commands).
-    Delegates Callbacks to CallbackMixin.
     """
     
     user_states = {}
@@ -31,7 +30,7 @@ class HandlerMixin:
                 msg = u["message"]
                 cid = msg["chat"]["id"]
                 
-                # --- SAFE TEXT EXTRACTION (Prevents Crash) ---
+                # --- SAFE TEXT EXTRACTION ---
                 raw_text = msg.get("text")
                 txt = raw_text.strip() if raw_text else ""
                 
@@ -52,7 +51,6 @@ class HandlerMixin:
                 is_admin = is_owner or (user_data and user_data.get("is_admin", False))
                 is_authorized = is_owner or (user_data is not None)
 
-                # Initialize Owner state if missing
                 if is_owner and not user_data:
                     user_data = {"permissions": [], "allowed_dids": [], "is_admin": True}
 
@@ -61,33 +59,25 @@ class HandlerMixin:
                      return
 
                 # ====================================================
-                # 🖥️ MAIN DASHBOARD (Reply Keyboard)
+                # 🖥️ MAIN DASHBOARD
                 # ====================================================
                 if txt == "/start" or txt == "/menu" or txt == "🔙 Back to Main Menu":
                     
-                    # Row 1
                     rows = [
                         [KeyboardButton(text="📋 All Numbers"), KeyboardButton(text="🔢 Choose Number")]
                     ]
                     
-                    # Row 2 (Admin Only)
                     if is_admin:
                         rows.append([KeyboardButton(text="➕ Add Number"), KeyboardButton(text="➖ Remove Number")])
                     
-                    # Row 3
                     rows.append([KeyboardButton(text="📂 Export"), KeyboardButton(text="📜 History")])
                     
-                    # Row 4 (Owner Only)
                     if is_owner:
                         rows.append([KeyboardButton(text="🔐 Admin Panel")])
 
                     kb = ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
-                    await self.bot.send_to_chat(
-                        cid, 
-                        "👋 <b>IVASMS Dashboard</b>\nSelect an option below:", 
-                        reply_markup=kb
-                    )
+                    await self.bot.send_to_chat(cid, "👋 <b>IVASMS Dashboard</b>\nSelect an option below:", reply_markup=kb)
                     return
 
                 # ====================================================
@@ -161,20 +151,59 @@ class HandlerMixin:
                     if not found_any: history_text += "<i>No recent OTPs found.</i>"
                     await self.bot.send_to_chat(cid, history_text)
 
-                # --- 🔴 SYSTEM ---
+                # ====================================================
+                # 🔴 ADMIN PANEL (REPLY KEYBOARD)
+                # ====================================================
                 elif txt == "🔐 Admin Panel":
                     if not is_owner: 
                         await self.bot.send_to_chat(cid, "⛔ <b>Owner Only.</b>")
                         return
                     
-                    # FIXED: Using proper InlineKeyboardMarkup object
-                    kb = InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="👤 User Settings", callback_data="usr:main"), 
-                         InlineKeyboardButton(text="📧 Account Settings", callback_data="acc:main")], 
-                        [InlineKeyboardButton(text="🔑 Assign Access", callback_data="perm:main")]
-                    ])
+                    # NEW: Reply Keyboard for Admin Menu
+                    rows = [
+                        [KeyboardButton(text="👤 User Settings"), KeyboardButton(text="📧 Account Settings")],
+                        [KeyboardButton(text="🔑 Assign Access"), KeyboardButton(text="🔙 Back to Main Menu")]
+                    ]
+                    kb = ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
                     
-                    await self.bot.send_to_chat(cid, "<b>🔐 Owner Control Panel</b>\nManage your team and accounts:", reply_markup=kb)
+                    await self.bot.send_to_chat(cid, "<b>🔐 Admin Panel</b>\nSelect an option:", reply_markup=kb)
+
+                # --- 🔴 Admin Sub-Menus (Triggered by the Reply Keyboard above) ---
+                elif txt == "👤 User Settings":
+                    if not is_owner: return
+                    users = await self.db.get_all_users()
+                    kb_rows = []
+                    for u in users:
+                        if u['chat_id'] == self.cfg.OWNER_ID: continue
+                        kb_rows.append([InlineKeyboardButton(text=f"👤 {u.get('name','User')} ({u['chat_id']})", callback_data=f"perm:sel_usr:{u['chat_id']}")])
+                    
+                    kb_rows.append([InlineKeyboardButton(text="➕ Add User by ID", callback_data="usr:add")])
+                    # No back button needed here since they have the Reply Keyboard
+                    markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+                    await self.bot.send_to_chat(cid, "<b>👤 User Management</b>\nSelect user to edit:", reply_markup=markup)
+
+                elif txt == "📧 Account Settings":
+                    if not is_owner: return
+                    accounts = await self.db.get_all_accounts()
+                    kb_rows = [[InlineKeyboardButton(text=f"🗑 {a['email']}", callback_data=f"acc:del:{a['email']}")] for a in accounts]
+                    kb_rows.append([InlineKeyboardButton(text="➕ Add Account", callback_data="acc:add")])
+                    
+                    markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+                    await self.bot.send_to_chat(cid, "<b>📧 Account Settings</b>\nClick to delete:", reply_markup=markup)
+
+                elif txt == "🔑 Assign Access":
+                    # Re-uses the user list logic but framed as permissions
+                    # For simplicity, we just trigger the user selection list again, 
+                    # as clicking a user in "User Settings" allows assigning access anyway.
+                    if not is_owner: return
+                    users = await self.db.get_all_users()
+                    kb_rows = []
+                    for u in users:
+                        if u['chat_id'] == self.cfg.OWNER_ID: continue
+                        kb_rows.append([InlineKeyboardButton(text=f"🔑 {u.get('name','User')}", callback_data=f"perm:sel_usr:{u['chat_id']}")])
+                    
+                    markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+                    await self.bot.send_to_chat(cid, "<b>🔑 Assign Access</b>\nSelect user to manage permissions:", reply_markup=markup)
 
                 # ====================================================
                 # 5. INPUT HANDLING
