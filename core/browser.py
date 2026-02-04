@@ -2,7 +2,7 @@ import json
 import time
 import re
 import os
-import state
+import utils 
 import config
 from utils import log
 from core.notifier import send_sync_message

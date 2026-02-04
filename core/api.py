@@ -1,6 +1,6 @@
 import aiohttp
 import asyncio
-import state
+import utils
 import config
 from utils import log
 import re
