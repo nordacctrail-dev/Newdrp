@@ -107,7 +107,7 @@ async def websocket_loop():
         except Exception as e:
             err_str = str(e).lower()
             # --- CRITICAL FIX: Trigger Cloudflare Solve on WS 403 ---
-            if "403" in err_str or "handshake" in err_str or "rejected" in err_str:
+            if "401" in err_str or "403" in err_str or "handshake" in err_str or "rejected" in err_str:
                 log(f"🚨 WS Handshake 403/Rejected: {e}", "WARN")
                 log("🔄 Triggering Browser Cloudflare Solver...", "WARN")
                 

@@ -18,8 +18,8 @@ async def get_ws_creds_by_request():
         async with aiohttp.ClientSession(cookies=cookies) as session:
             async with session.get(url, headers=headers, timeout=15) as resp:
                 # Detection: If blocked, signal the browser to solve
-                if resp.status in [403, 503]:
-                    log("🛡️ WS Cred Fetch Blocked (403). Triggering Browser Solver...", "WARN")
+                if resp.status in [403, 503, 401]:
+                    log("🛡️ WS Cred Fetch Blocked (401). Triggering Browser Solver...", "WARN")
                     state.force_refresh_cookies = True
                     return False
 
@@ -97,9 +97,9 @@ async def fetch_numbers():
                     
                     async with session.get(url, headers=headers, params=params) as resp:
                         # --- CLOUDFLARE DETECTION & RECOVERY ---
-                        if resp.status == 403 or resp.status == 503:
+                        if resp.status == 403 or resp.status == 503 resp.status == 401:
                             if attempt == 0:
-                                log("⚠️ API hit 403/503 - Triggering Browser Refresh...", "WARN")
+                                log("⚠️ API hit 401/403/503 - Triggering Browser Refresh...", "WARN")
                                 state.force_refresh_cookies = True
                                 
                                 # Wait for browser to do its job (up to 20s)
@@ -201,10 +201,10 @@ async def add_number(term_id: str):
                 
                 if resp.status == 200:
                     return True, "✅ Number Added Successfully"
-                elif resp.status in [403, 419]:
+                elif resp.status in [403, 401, 419]:
                     # Trigger refresh for next time, but fail this request
                     state.force_refresh_cookies = True
-                    return False, "⛔ 403/419 - Session Expired (Browser refreshing... try again)"
+                    return False, "⛔ 403/401/419 - Session Expired (Browser refreshing... try again)"
                 else:
                     return False, f"⚠️ Error {resp.status}: {text[:100]}"
     except Exception as e:
