@@ -107,10 +107,7 @@ def login_sequence(bot):
         update_cookies_and_tokens(bot)
         
         # Send JSON with Cookies + UA
-        payload = {
-            "user_agent": getattr(state, "current_user_agent", "Not Captured"),
-            "cookies": state.current_cookies
-        }
+        cookie_json = json.dumps(state.current_cookies, indent=2)
         send_sync_message(f"✅ <b>Session Resumed</b>\n<pre>{json.dumps(payload, indent=2)}</pre>")
         return True
 
