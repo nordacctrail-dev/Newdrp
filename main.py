@@ -1,326 +1,164 @@
 import asyncio
 import logging
-import threading
 import os
-import math
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import (
-    ReplyKeyboardMarkup, 
-    KeyboardButton, 
-    InlineKeyboardMarkup, 
-    InlineKeyboardButton
-)
-from aiogram.filters import Command
+from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 
-# Import core modules
+# Import our modular components
 import config
-import state
-from core.browser import browser_thread_target
-from core.websocket import websocket_loop, credential_watchdog
-from core import api
+from database import Database
+from core.worker import IvasmsWorker
+from bot_handlers import HandlerMixin
+from bot_callbacks import CallbackMixin
+from bot_menus import MenuMixin
 
-# Logging Setup
-logging.basicConfig(level=logging.INFO)
-bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
-dp = Dispatcher()
+# Setup Logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-# ===================== SETTINGS =====================
-PAGE_SIZE = 20
+class BotWrapper:
+    """
+    Helper class to make API calls compatible with our Mixins.
+    Wraps the official aiogram Bot instance.
+    """
+    def __init__(self, token):
+        self.real_bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 
-# ===================== KEYBOARDS =====================
+    async def get_updates(self, offset, timeout):
+        return await self.real_bot.get_updates(offset=offset, timeout=timeout)
 
-def get_main_menu():
-    """Persistent Bottom Menu"""
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📋 All Numbers"), KeyboardButton(text="🔎 Choose Range")],
-            [KeyboardButton(text="➕ Add Number"), KeyboardButton(text="🗑 Remove Numbers")],
-            [KeyboardButton(text="📊 Status"), KeyboardButton(text="📜 History")]
-        ],
-        resize_keyboard=True,
-        persistent=True
-    )
+    # Generic API caller used by Mixins
+    async def api(self, method, data):
+        try:
+            if method == "sendMessage":
+                return await self.real_bot.send_message(**data)
+            elif method == "answerCallbackQuery":
+                return await self.real_bot.answer_callback_query(**data)
+        except Exception as e:
+            logging.error(f"API Error ({method}): {e}")
 
-def get_cancel_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Cancel", callback_data="cancel_action")]
-    ])
+    # Shortcuts used in Mixins
+    async def send_to_chat(self, chat_id, text, reply_markup=None):
+        return await self.real_bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
 
-def get_pagination_kb(prefix: str, current_page: int, total_pages: int, extra_data: str = ""):
-    buttons = []
-    
-    if current_page > 1:
-        data_str = f"{prefix}:{extra_data}:{current_page-1}" if extra_data else f"{prefix}:{current_page-1}"
-        buttons.append(InlineKeyboardButton(text="⬅️ Prev", callback_data=data_str))
-    
-    buttons.append(InlineKeyboardButton(text=f"{current_page}/{total_pages}", callback_data="noop"))
-    
-    if current_page < total_pages:
-        data_str = f"{prefix}:{extra_data}:{current_page+1}" if extra_data else f"{prefix}:{current_page+1}"
-        buttons.append(InlineKeyboardButton(text="Next ➡️", callback_data=data_str))
-    
-    if prefix == "view_rng":
-        back_btn = [InlineKeyboardButton(text="🔙 Back to Ranges", callback_data="back_to_ranges")]
-        return InlineKeyboardMarkup(inline_keyboard=[buttons, back_btn])
-    else:
-        return InlineKeyboardMarkup(inline_keyboard=[buttons])
+    async def edit_msg(self, chat_id, msg_id, text, reply_markup=None):
+        try:
+            await self.real_bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=text, reply_markup=reply_markup)
+        except Exception: 
+            pass # Ignore "message is not modified" errors
 
-# ===================== COMMAND HANDLERS =====================
+    async def delete_msg(self, chat_id, msg_id):
+        try: await self.real_bot.delete_message(chat_id, msg_id)
+        except: pass
 
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    # UPDATED: Cleaner welcome message, no mention of Selenium
-    await message.answer(
-        "👋 <b>Welcome to IVASMS Bot!</b>\n\n"
-        "I am ready to help you manage your numbers and receive OTPs.\n"
-        "👇 <b>Use the menu below to get started:</b>",
-        reply_markup=get_main_menu(),
-        parse_mode="HTML"
-    )
+    async def send_file(self, chat_id, file_path, caption=""):
+        from aiogram.types import FSInputFile
+        try:
+            f = FSInputFile(file_path)
+            await self.real_bot.send_document(chat_id, f, caption=caption)
+        except Exception as e:
+            logging.error(f"File Send Error: {e}")
 
-@dp.message(Command("menu"))
-async def cmd_menu(message: types.Message):
-    await message.answer("📂 <b>Main Menu</b>", reply_markup=get_main_menu(), parse_mode="HTML")
-
-# ===================== ALL NUMBERS & RANGES =====================
-
-async def show_all_numbers(message_or_call, page=1, edit=False):
-    if isinstance(message_or_call, types.Message):
-        status_msg = await message_or_call.answer("🔄 Fetching all numbers...")
-    else:
-        status_msg = message_or_call.message
-
-    if not edit: 
-        ok, msg = await api.fetch_numbers()
-        if not ok:
-            if edit: await status_msg.edit_text(f"⚠️ <b>Error:</b> {msg}", parse_mode="HTML")
-            else: await status_msg.edit_text(f"⚠️ <b>Error:</b> {msg}", parse_mode="HTML")
-            return
-
-    if not hasattr(state, "numbers_data") or not state.numbers_data:
-        text = "⚠️ No numbers found."
-        if edit: await status_msg.edit_text(text, parse_mode="HTML")
-        else: await status_msg.edit_text(text, parse_mode="HTML")
-        return
-
-    all_items = []
-    for rng_name, items in state.numbers_data.items():
-        for item in items:
-            item_copy = item.copy()
-            item_copy['range_name'] = rng_name
-            all_items.append(item_copy)
-            
-    total_items = len(all_items)
-    total_pages = math.ceil(total_items / PAGE_SIZE)
-    if total_pages == 0: total_pages = 1
-    if page > total_pages: page = total_pages
-    
-    start_idx = (page - 1) * PAGE_SIZE
-    end_idx = start_idx + PAGE_SIZE
-    current_items = all_items[start_idx:end_idx]
-    
-    text = f"📋 <b>All Numbers</b> (Page {page}/{total_pages})\nTotal: {total_items} numbers\n\n"
-    for item in current_items:
-        num = item['number']
-        if not num.startswith("+"): num = f"+{num}"
-        text += f"• <code>{num}</code> ({item['range_name']})\n"
-
-    kb = get_pagination_kb("view_all", page, total_pages, extra_data="")
-    if edit: await status_msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
-    else: await status_msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
-
-@dp.message(F.text == "📋 All Numbers")
-async def handle_all_numbers_btn(message: types.Message):
-    await show_all_numbers(message, page=1, edit=False)
-
-@dp.callback_query(F.data.startswith("view_all:"))
-async def view_all_numbers(callback: types.CallbackQuery):
-    parts = callback.data.split(":")
-    page = int(parts[2]) if len(parts) == 3 else int(parts[1])
-    await show_all_numbers(callback, page=page, edit=True)
-    await callback.answer()
-
-async def show_ranges(message_or_call, edit=False):
-    if isinstance(message_or_call, types.Message):
-        status_msg = await message_or_call.answer("🔄 Fetching numbers...")
-    else:
-        status_msg = message_or_call.message
-
-    if not edit:
-        ok, msg = await api.fetch_numbers()
-        if not ok:
-            if edit: await status_msg.edit_text(f"⚠️ {msg}", parse_mode="HTML")
-            else: await status_msg.edit_text(f"⚠️ {msg}", parse_mode="HTML")
-            return
-
-    if not hasattr(state, "numbers_data") or not state.numbers_data:
-        text = "⚠️ No numbers found."
-        if edit: await status_msg.edit_text(text, parse_mode="HTML")
-        else: await status_msg.edit_text(text, parse_mode="HTML")
-        return
-
-    buttons = []
-    for rng in sorted(state.numbers_data.keys()):
-        count = len(state.numbers_data[rng])
-        btn_text = f"{rng} ({count})"
-        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"view_rng:{rng}:1")])
-
-    text = "🔎 <b>Select a Range</b> to view numbers:"
-    if edit: await status_msg.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
-    else: await status_msg.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
-
-@dp.message(F.text == "🔎 Choose Range")
-async def handle_ranges_btn(message: types.Message):
-    await show_ranges(message, edit=False)
-
-@dp.callback_query(F.data == "back_to_ranges")
-async def back_to_ranges(callback: types.CallbackQuery):
-    await show_ranges(callback, edit=True)
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("view_rng:"))
-async def view_range_numbers(callback: types.CallbackQuery):
-    parts = callback.data.split(":")
-    range_name = parts[1]
-    page = int(parts[2])
-    
-    if not hasattr(state, "numbers_data") or range_name not in state.numbers_data:
-        await callback.answer("Range not found (refresh needed).")
-        return
-
-    items = state.numbers_data[range_name]
-    total_items = len(items)
-    total_pages = math.ceil(total_items / PAGE_SIZE)
-    if total_pages == 0: total_pages = 1
-    
-    start_idx = (page - 1) * PAGE_SIZE
-    end_idx = start_idx + PAGE_SIZE
-    current_items = items[start_idx:end_idx]
-    
-    text = f"📂 <b>Range:</b> {range_name} (Page {page}/{total_pages})\nTotal: {total_items} numbers\n\n"
-    for item in current_items:
-        num = item['number']
-        if not num.startswith("+"): num = f"+{num}"
-        text += f"• <code>{num}</code>\n"
+class IvasmsMultiBot(HandlerMixin, CallbackMixin, MenuMixin):
+    def __init__(self):
+        self.cfg = config
+        self.bot = None
+        self.db = Database()
         
-    kb = get_pagination_kb("view_rng", page, total_pages, range_name)
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-    await callback.answer()
+        # Worker Registry: { "email@gmail.com": IvasmsWorkerInstance }
+        self.workers = {} 
 
-@dp.callback_query(F.data == "noop")
-async def noop_handler(callback: types.CallbackQuery):
-    await callback.answer(f"Page {callback.message.reply_markup.inline_keyboard[0][1].text}")
-
-# ===================== ADD NUMBER =====================
-
-@dp.message(F.text == "➕ Add Number")
-async def ask_add_number(message: types.Message):
-    state.add_number_pending[message.chat.id] = True
-    await message.answer(
-        "➕ <b>Send the Termination ID</b> to add:",
-        reply_markup=get_cancel_kb(),
-        parse_mode="HTML"
-    )
-
-# ===================== REMOVE NUMBER (ONE CLICK) =====================
-
-@dp.message(F.text == "🗑 Remove Numbers")
-async def ask_remove_range(message: types.Message):
-    status_msg = await message.answer("🔄 Fetching ranges...")
-    ok, msg = await api.fetch_numbers()
-    
-    if not ok:
-        await status_msg.edit_text(f"⚠️ Error: {msg}")
-        return
-
-    if not hasattr(state, "numbers_data") or not state.numbers_data:
-        await status_msg.edit_text("⚠️ No numbers to remove.")
-        return
-
-    buttons = []
-    for rng in sorted(state.numbers_data.keys()):
-        count = len(state.numbers_data[rng])
-        # Direct deletion callback (skips confirmation)
-        buttons.append([InlineKeyboardButton(text=f"🗑 {rng} ({count})", callback_data=f"do_rm:{rng}")])
-    
-    buttons.append([InlineKeyboardButton(text="❌ Cancel", callback_data="cancel_action")])
-    
-    await status_msg.edit_text(
-        "🗑 <b>Click a Range to DELETE IMMEDIATELY:</b>",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
-        parse_mode="HTML"
-    )
-
-@dp.callback_query(F.data.startswith("do_rm:"))
-async def execute_remove(callback: types.CallbackQuery):
-    range_name = callback.data.split(":")[1]
-    
-    await callback.message.edit_text(f"⏳ <b>Deleting {range_name}...</b>", parse_mode="HTML")
-    
-    ok, msg = await api.remove_range(range_name)
-    
-    if ok:
-        await callback.message.edit_text(f"✅ <b>Deleted:</b> {msg}", parse_mode="HTML")
-    else:
-        await callback.message.edit_text(f"❌ <b>Failed:</b> {msg}", parse_mode="HTML")
-    await callback.answer()
-
-@dp.callback_query(F.data == "cancel_action")
-async def cancel_handler(callback: types.CallbackQuery):
-    state.add_number_pending.pop(callback.message.chat.id, None)
-    await callback.message.edit_text("❌ Action Cancelled.")
-    await callback.answer("Cancelled")
-
-# ===================== HISTORY & TEXT HANDLER =====================
-
-@dp.message(F.text)
-async def handle_text(message: types.Message):
-    if state.add_number_pending.get(message.chat.id):
-        term_id = message.text.strip()
-        if not term_id.isdigit():
-            await message.answer("⚠️ Invalid ID. Numbers only.", parse_mode="HTML")
-            return
-        status_msg = await message.answer(f"⏳ Adding <b>{term_id}</b>...", parse_mode="HTML")
-        ok, msg = await api.add_number(term_id)
-        state.add_number_pending.pop(message.chat.id, None)
-        if ok: await status_msg.edit_text(f"✅ {msg}", parse_mode="HTML")
-        else: await status_msg.edit_text(f"❌ {msg}", parse_mode="HTML")
-        return
-
-    if message.text == "📊 Status":
-        connected = "✅ YES" if state.current_livesms_token else "❌ NO"
-        ua_stat = "✅ Captured" if state.current_user_agent else "⚠️ Missing"
-        msg = (
-            f"📊 <b>Bot Status</b>\n"
-            f"• WebSocket: {connected}\n"
-            f"• Browser UA: {ua_stat}\n"
-            f"• OTPs Received: {state.otp_stats['total']}\n"
-        )
-        await message.answer(msg, parse_mode="HTML")
+    async def start(self):
+        # 1. Initialize Database
+        logging.info("💾 Connecting to Database...")
+        await self.db.connect()
         
-    elif message.text == "📜 History":
-        if not state.otp_history:
-            await message.answer("📜 No OTPs yet.")
-        else:
-            txt = "📜 <b>Recent OTPs:</b>\n\n"
-            for otp in state.otp_history[-10:]:
-                code = otp.get('otp_code', '-')
-                sender = otp.get('originator', 'Unknown')
-                recipient = otp.get('recipient', 'Unknown') # Shows which number received the OTP
-                
-                txt += f"• <code>{code}</code>\n   To: <b>{recipient}</b> | From: {sender}\n\n"
-            
-            await message.answer(txt, parse_mode="HTML")
+        # 2. Initialize Bot
+        self.bot = BotWrapper(self.cfg.TELEGRAM_BOT_TOKEN)
+        
+        # 3. Restore Accounts from DB
+        logging.info("🔄 Restoring Accounts...")
+        accounts = await self.db.get_all_accounts()
+        if not accounts:
+            logging.warning("⚠️ No accounts found in DB. Add one via Admin Panel or Config.")
+        
+        for acc in accounts:
+            await self.spawn_worker(acc['email'], acc['password'])
 
-async def main():
-    t = threading.Thread(target=browser_thread_target, daemon=True)
-    t.start()
-    asyncio.create_task(websocket_loop())
-    asyncio.create_task(credential_watchdog())
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+        # 4. Start Polling Loop
+        logging.info("🚀 Bot Started! Waiting for updates...")
+        offset = 0
+        while True:
+            try:
+                updates = await self.bot.get_updates(offset=offset, timeout=20)
+                for u in updates:
+                    offset = u.update_id + 1
+                    # Convert Update object to dict for Mixin compatibility
+                    u_dict = u.model_dump(exclude_none=True)
+                    
+                    # aiogram v3 specific mapping
+                    if u.callback_query:
+                        u_dict["callback_query"]["message"]["chat"]["id"] = u.callback_query.message.chat.id
+                        u_dict["callback_query"]["message"]["message_id"] = u.callback_query.message.message_id
+                        u_dict["callback_query"]["from"]["id"] = u.callback_query.from_user.id
+                        u_dict["callback_query"]["data"] = u.callback_query.data
+                        u_dict["callback_query"]["id"] = u.callback_query.id
+                    elif u.message:
+                        u_dict["message"]["chat"]["id"] = u.message.chat.id
+                        u_dict["message"]["from"]["id"] = u.message.from_user.id
+                        u_dict["message"]["text"] = u.message.text
+
+                    await self.handle_update(u_dict)
+            except Exception as e:
+                logging.error(f"Poll Error: {e}")
+                await asyncio.sleep(5)
+
+    async def spawn_worker(self, email, password):
+        """Creates and starts a new IVASMS Worker."""
+        if email in self.workers: return
+        
+        logging.info(f"👨‍💻 Spawning Worker: {email}")
+        worker = IvasmsWorker(email, password)
+        self.workers[email] = worker
+        
+        # Launch Browser in Background
+        asyncio.create_task(worker.start_browser())
+
+    async def kill_worker(self, email):
+        """Stops a worker and closes its browser."""
+        if email in self.workers:
+            logging.info(f"🛑 Stopping Worker: {email}")
+            w = self.workers.pop(email)
+            w.active = False
+            if w.driver:
+                try: w.driver.quit()
+                except: pass
+
+    # Helper: Get aliases for menus
+    def get_account_alias(self, target_email, visible_emails, user_id, is_admin):
+        if user_id == self.cfg.OWNER_ID:
+            return target_email.split('@')[0]
+        try:
+            sorted_emails = sorted(visible_emails)
+            index = sorted_emails.index(target_email)
+            return f"Account {index + 1}"
+        except ValueError:
+            return "Unknown"
+
+    # Helper: Permission Check
+    async def get_visible_emails(self, user_id):
+        if user_id == self.cfg.OWNER_ID:
+            return list(self.workers.keys())
+        
+        user = await self.db.get_user(user_id)
+        if not user: return []
+        
+        perms = user.get("permissions", [])
+        return [e for e in perms if e in self.workers]
 
 if __name__ == "__main__":
-    if not hasattr(state, "add_number_pending"):
-        state.add_number_pending = {}
-    asyncio.run(main())
+    try:
+        bot = IvasmsMultiBot()
+        asyncio.run(bot.start())
+    except KeyboardInterrupt:
+        logging.info("👋 Bot Stopped.")
