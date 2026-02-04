@@ -1,13 +1,15 @@
 import os
 
 # ===================== RAILWAY / DOCKER CONFIG =====================
-# Path to Chrome. On Railway/Linux, usually /usr/bin/google-chrome
 CHROMIUM_BINARY = os.getenv("CHROMIUM_BINARY", "/usr/bin/google-chrome")
 
+# ===================== DATABASE CONFIG (NEW) =====================
+# Update this with your actual MongoDB Connection String
+MONGO_URL = os.getenv("MONGO_URL", "mongodb://localhost:27017")
+DB_NAME = "ivasms_bot"
+
 # ===================== TELEGRAM CONFIG =====================
-# Get these from @BotFather and @userinfobot
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TOKEN_HERE")
-# Your numeric User ID (This user is the Super Admin/Owner)
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
 # ===================== IVASMS URLS =====================
@@ -19,6 +21,3 @@ LIVE_SMS_URL = "https://www.ivasms.com/portal/live/my_sms"
 NUMBERS_BASE_URL = "https://www.ivasms.com/portal/numbers"
 ADD_NUMBER_URL = "https://www.ivasms.com/portal/numbers/termination/number/add"
 REMOVE_NUMBER_URL = "https://www.ivasms.com/portal/numbers/return/number/bluck"
-
-# ===================== APP SETTINGS =====================
-DB_NAME = "ivasms_bot.db"

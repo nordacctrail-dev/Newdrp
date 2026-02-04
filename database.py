@@ -1,80 +1,77 @@
-import aiosqlite
-import json
+import motor.motor_asyncio
 import logging
-from config import DB_NAME
+from datetime import datetime
+from config import MONGO_URL, DB_NAME
 
 class Database:
     def __init__(self):
-        self.conn = None
+        self.client = None
+        self.db = None
+        self.users = None
+        self.accounts = None
 
     async def connect(self):
-        """Establishes connection to the SQLite database."""
-        self.conn = await aiosqlite.connect(DB_NAME)
-        self.conn.row_factory = aiosqlite.Row
-        await self.create_tables()
-
-    async def create_tables(self):
-        """Creates Users and Accounts tables."""
-        # USERS TABLE: Stores Telegram User info and their permissions
-        await self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                chat_id INTEGER PRIMARY KEY,
-                name TEXT,
-                username TEXT,
-                is_admin BOOLEAN DEFAULT 0,
-                permissions TEXT DEFAULT '[]', -- List of emails this user can access
-                allowed_dids TEXT DEFAULT '[]', -- (Optional) Specific numbers
-                thread_id INTEGER
-            )
-        """)
-        
-        # ACCOUNTS TABLE: Stores IVASMS Login Credentials
-        await self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS accounts (
-                email TEXT PRIMARY KEY,
-                password TEXT,
-                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        await self.conn.commit()
+        """Establishes connection to MongoDB."""
+        try:
+            self.client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL)
+            self.db = self.client[DB_NAME]
+            self.users = self.db.users
+            self.accounts = self.db.accounts
+            logging.info("✅ Connected to MongoDB")
+        except Exception as e:
+            logging.error(f"❌ MongoDB Connection Failed: {e}")
 
     # ====================================================
     # 👤 USER METHODS
     # ====================================================
     async def get_user(self, chat_id):
         """Fetches a user profile."""
-        async with self.conn.execute("SELECT * FROM users WHERE chat_id = ?", (chat_id,)) as cursor:
-            row = await cursor.fetchone()
-            if row:
-                d = dict(row)
-                # Convert JSON strings back to Python lists
-                d['permissions'] = json.loads(d['permissions'])
-                d['allowed_dids'] = json.loads(d['allowed_dids'])
-                d['is_admin'] = bool(d['is_admin'])
-                return d
-            return None
+        doc = await self.users.find_one({"_id": chat_id})
+        if doc:
+            # Normalize data structure to match what the bot expects
+            doc['chat_id'] = doc['_id'] # Ensure chat_id key exists
+            doc['permissions'] = doc.get('permissions', [])
+            doc['allowed_dids'] = doc.get('allowed_dids', [])
+            return doc
+        return None
 
-    async def add_user(self, chat_id, name="Unknown"):
-        """Adds a new Telegram user."""
+    async def add_user(self, chat_id, name="Unknown", is_admin=False, thread_id=None):
+        """Adds a new Telegram user (if not exists)."""
         try:
-            await self.conn.execute(
-                "INSERT OR IGNORE INTO users (chat_id, name, is_admin) VALUES (?, ?, 0)",
-                (chat_id, name)
+            await self.users.update_one(
+                {"_id": chat_id},
+                {"$setOnInsert": {
+                    "name": name,
+                    "is_admin": is_admin,
+                    "permissions": [],
+                    "allowed_dids": [],
+                    "thread_id": thread_id,
+                    "joined_at": datetime.now()
+                }},
+                upsert=True
             )
-            await self.conn.commit()
         except Exception as e:
             logging.error(f"DB Add User Error: {e}")
 
+    async def update_identity(self, chat_id, name, username):
+        """Updates name/username on interaction."""
+        await self.users.update_one(
+            {"_id": chat_id},
+            {"$set": {"name": name, "username": username}}
+        )
+
     async def get_all_users(self):
         """Returns list of all users."""
-        async with self.conn.execute("SELECT * FROM users") as cursor:
-            rows = await cursor.fetchall()
-            return [dict(r) for r in rows]
+        cursor = self.users.find()
+        users = await cursor.to_list(length=None)
+        # Map _id back to chat_id for compatibility
+        for u in users:
+            u['chat_id'] = u['_id']
+        return users
 
     async def remove_user(self, chat_id):
         """Deletes a user."""
-        await self.conn.execute("DELETE FROM users WHERE chat_id=?", (chat_id,))
-        await self.conn.commit()
+        await self.users.delete_one({"_id": chat_id})
 
     # ====================================================
     # 🔑 PERMISSION METHODS
@@ -84,34 +81,70 @@ class Database:
         user = await self.get_user(chat_id)
         if not user: return
         
-        perms = user['permissions']
+        perms = user.get('permissions', [])
+        
         if email in perms:
-            perms.remove(email)
+            # Revoke (Pull)
+            await self.users.update_one(
+                {"_id": chat_id},
+                {"$pull": {"permissions": email}}
+            )
         else:
-            perms.append(email)
-            
-        await self.conn.execute("UPDATE users SET permissions=? WHERE chat_id=?", (json.dumps(perms), chat_id))
-        await self.conn.commit()
+            # Grant (AddToSet)
+            await self.users.update_one(
+                {"_id": chat_id},
+                {"$addToSet": {"permissions": email}}
+            )
 
     async def set_admin_status(self, chat_id, status: bool):
         """Promotes or Demotes a user."""
-        await self.conn.execute("UPDATE users SET is_admin=? WHERE chat_id=?", (status, chat_id))
-        await self.conn.commit()
+        await self.users.update_one(
+            {"_id": chat_id},
+            {"$set": {"is_admin": status}}
+        )
+
+    async def grant_all_emails(self, chat_id):
+        """Gives user access to ALL currently saved accounts."""
+        # Fetch all emails first
+        accts = await self.get_all_accounts()
+        all_emails = [a['email'] for a in accts]
+        
+        await self.users.update_one(
+            {"_id": chat_id},
+            {"$set": {"permissions": all_emails}}
+        )
+
+    async def revoke_all_emails(self, chat_id):
+        """Clears all permissions."""
+        await self.users.update_one(
+            {"_id": chat_id},
+            {"$set": {"permissions": []}}
+        )
 
     # ====================================================
     # 📧 ACCOUNT METHODS (IVASMS)
     # ====================================================
     async def add_account(self, email, password):
         """Saves an IVASMS account."""
-        await self.conn.execute("INSERT OR REPLACE INTO accounts (email, password) VALUES (?, ?)", (email, password))
-        await self.conn.commit()
+        await self.accounts.update_one(
+            {"_id": email},
+            {"$set": {
+                "email": email,
+                "password": password,
+                "updated_at": datetime.now()
+            }},
+            upsert=True
+        )
 
     async def get_all_accounts(self):
         """Fetches all saved IVASMS accounts."""
-        async with self.conn.execute("SELECT * FROM accounts") as cursor:
-            return [dict(r) for r in await cursor.fetchall()]
+        cursor = self.accounts.find()
+        accounts = await cursor.to_list(length=None)
+        # Ensure email key exists (though _id is email)
+        for a in accounts:
+            a['email'] = a['_id']
+        return accounts
 
     async def remove_account(self, email):
         """Deletes an IVASMS account."""
-        await self.conn.execute("DELETE FROM accounts WHERE email=?", (email,))
-        await self.conn.commit()
+        await self.accounts.delete_one({"_id": email})
