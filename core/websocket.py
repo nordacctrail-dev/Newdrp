@@ -1,12 +1,13 @@
 import socketio
 import asyncio
-import utils  # CHANGED
+import state
 import config
 from urllib.parse import urlencode
 from utils import log, extract_otp
 from core.notifier import send_otp_notification
 import core.api as api
 
+# Initialize Client
 sio = socketio.AsyncClient(logger=True, engineio_logger=True, ssl_verify=False)
 
 @sio.event(namespace='/livesms')
@@ -48,20 +49,21 @@ def process_payload(payload):
             "country": payload.get("country_iso", "Unknown"),
         }
         
-        utils.otp_history.append(otp_data) # CHANGED
-        if len(utils.otp_history) > utils.MAX_HISTORY_SIZE: # CHANGED
-            utils.otp_history.pop(0) # CHANGED
+        state.otp_history.append(otp_data)
+        if len(state.otp_history) > state.MAX_HISTORY_SIZE:
+            state.otp_history.pop(0)
         
-        utils.otp_stats["total"] += 1 # CHANGED
+        state.otp_stats["total"] += 1
         asyncio.create_task(send_otp_notification(otp_data))
         log(f"📩 OTP: {otp_code} | {otp_data['originator']}", "OK")
 
 async def websocket_loop():
     """Main loop."""
-    while not utils.shutdown_event.is_set(): # CHANGED
+    while not state.shutdown_event.is_set():
+        # Wait for token AND user agent
         await api.get_ws_creds_by_request()
-        if not utils.current_livesms_token or not getattr(utils, "current_user_agent", None): # CHANGED
-            wait_time = 10 if utils.force_refresh_cookies else 5 # CHANGED
+        if not state.current_livesms_token or not getattr(state, "current_user_agent", None):
+            wait_time = 10 if state.force_refresh_cookies else 5
             await asyncio.sleep(wait_time)
             continue
 
@@ -70,25 +72,27 @@ async def websocket_loop():
                 log(f"🔌 DEBUG: Preparing WS Connection...", "INFO")
                 
                 params = {
-                    'token': utils.current_livesms_token, # CHANGED
-                    'user': utils.current_livesms_user # CHANGED
+                    'token': state.current_livesms_token,
+                    'user': state.current_livesms_user
                 }
                 
+                # Construct URL
                 base_host = "https://ivasms.com:2087"
                 query_string = urlencode(params)
                 connection_url = f"{base_host}?{query_string}"
 
+                # DYNAMIC HEADERS
                 headers = {
-                    "User-Agent": utils.current_user_agent, # CHANGED
+                    "User-Agent": state.current_user_agent,
                     "Origin": "https://www.ivasms.com",
                     "Host": "ivasms.com:2087",
                 }
                 
-                if utils.current_cookies: # CHANGED
-                    cookie_string = "; ".join([f"{k}={v}" for k,v in utils.current_cookies.items()]) # CHANGED
+                if state.current_cookies:
+                    cookie_string = "; ".join([f"{k}={v}" for k,v in state.current_cookies.items()])
                     headers["Cookie"] = cookie_string
 
-                log(f"🔄 Connecting with UA: {utils.current_user_agent[:30]}...", "INFO") # CHANGED
+                log(f"🔄 Connecting with UA: {state.current_user_agent[:30]}...", "INFO")
 
                 await sio.connect(
                     connection_url, 
@@ -106,19 +110,29 @@ async def websocket_loop():
                 log(f"🚨 WS Handshake 403/Rejected: {e}", "WARN")
                 log("🔄 Triggering Browser Cloudflare Solver...", "WARN")
                 
-                utils.force_refresh_cookies = True # CHANGED
-                utils.current_livesms_token = None # CHANGED
+                state.force_refresh_cookies = True
+                state.current_livesms_token = None
             else:
                 log(f"WS Loop Exception: {e}", "ERROR")
             
             await asyncio.sleep(15)
 
+# --- NEW WATCHDOG FUNCTION ---
 async def credential_watchdog():
+    """
+    Proactively checks credentials every 15 seconds.
+    If blocked (403), api.get_ws_creds_by_request automatically triggers the browser solver.
+    """
     log("🛡️ Credential Watchdog Started", "INFO")
-    while not utils.shutdown_event.is_set(): # CHANGED
+    while not state.shutdown_event.is_set():
         try:
-            if not utils.force_refresh_cookies: # CHANGED
+            # Don't check if we are already in the middle of solving
+            if not state.force_refresh_cookies:
+                # This function returns True if success, False if blocked/failed
+                # Crucially: It internally sets state.force_refresh_cookies = True on 403
                 await api.get_ws_creds_by_request()
+            
+            # Check every 15 seconds (adjust if needed, but don't go too low or you risk bans)
             await asyncio.sleep(15) 
         except Exception as e:
             log(f"Watchdog Error: {e}", "ERROR")
