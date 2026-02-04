@@ -67,7 +67,7 @@ async def fetch_numbers():
     for attempt in range(2):
         headers, cookies = await get_headers_and_cookies()
         
-        BATCH_SIZE = 50  # Match t3s.py (safe size)
+        BATCH_SIZE = 100  # Match t3s.py (safe size)
         start = 0
         draw = 1
         all_rows = []
@@ -88,7 +88,7 @@ async def fetch_numbers():
                         "columns[2][data]": "range",
                         "columns[3][data]": "A2P",
                         "columns[13][data]": "action",
-                        "order[0][column]": "1",
+                        "order[0][column]": "2",
                         "order[0][dir]": "desc",
                         "start": str(start),
                         "length": str(BATCH_SIZE),

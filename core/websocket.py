@@ -5,7 +5,7 @@ import config
 from urllib.parse import urlencode
 from utils import log, extract_otp
 from core.notifier import send_otp_notification
-from core import api
+import core.api as api
 # Initialize Client
 sio = socketio.AsyncClient(logger=True, engineio_logger=True, ssl_verify=False)
 
