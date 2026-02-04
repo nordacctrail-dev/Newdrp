@@ -1,43 +1,59 @@
 import asyncio
 import logging
-from utils import fmt_num
+import re
+from utils import fmt_num, ExportManager
 
 class HandlerMixin:
     """
-    Handles all Telegram text updates and renders the Persistent Dashboard.
+    Handles all Telegram updates (Messages, Commands).
+    Delegates Callbacks to CallbackMixin.
     """
     
-    # Stores temporary data for multi-step inputs (like adding numbers)
+    # State tracking for text inputs
     user_states = {}
 
     async def handle_update(self, u):
         try:
-            # 1. Delegate Callback (Inline Button) clicks to the Callback Handler
+            # ====================================================
+            # 1. CALLBACK QUERY DELEGATION
+            # ====================================================
             if "callback_query" in u:
                 await self.handle_callback(u)
                 return
 
-            # 2. Handle Text & Commands
+            # ====================================================
+            # 2. MESSAGE HANDLER (Text & Commands)
+            # ====================================================
             if "message" in u:
                 msg = u["message"]
                 cid = msg["chat"]["id"]
-                txt = msg.get("text", "").strip()
-                user_id = msg.get("from", {}).get("id")
                 
-                # --- ROLE & PERMISSION CHECK ---
+                # --- FIX: Safe Text Extraction ---
+                # If msg["text"] is None (photo/sticker), default to ""
+                raw_text = msg.get("text")
+                txt = raw_text.strip() if raw_text else ""
+                
+                user = msg.get("from", {})
+                user_id = user.get("id")
+                first_name = user.get("first_name", "Unknown")
+                username = user.get("username", "")
+                reply_to = msg.get("reply_to_message")
+                
+                # Update Identity
+                if txt == "/start":
+                    await self.db.update_identity(user_id, first_name, username)
+
+                # --- PERMISSIONS CHECK ---
                 is_owner = (user_id == self.cfg.OWNER_ID)
                 user_data = await self.db.get_user(user_id)
                 
-                # Admin: Owner OR anyone marked as is_admin in DB
                 is_admin = is_owner or (user_data and user_data.get("is_admin", False))
-                # Authorized: Owner OR anyone present in DB
                 is_authorized = is_owner or (user_data is not None)
 
-                # First run safety: Initialize Owner state if missing from DB
+                # Initialize Owner state if missing
                 if is_owner and not user_data:
                     user_data = {"permissions": [], "allowed_dids": [], "is_admin": True}
 
-                # Block unauthorized access
                 if not is_authorized and cid > 0:
                      await self.bot.send_to_chat(cid, "⛔ <b>Access Denied</b>\nContact the Administrator.")
                      return
@@ -47,21 +63,15 @@ class HandlerMixin:
                 # ====================================================
                 if txt == "/start" or txt == "/menu" or txt == "🔙 Back to Main Menu":
                     
-                    # Row 1: Universal Access
                     kb = [
                         [{"text": "📋 All Numbers"}, {"text": "🔢 Choose Number"}]
                     ]
                     
-                    # Row 2: Admin & Owner Only (Add/Remove)
-                    # This row is HIDDEN for regular users
                     if is_admin:
                         kb.append([{"text": "➕ Add Number"}, {"text": "➖ Remove Number"}])
                     
-                    # Row 3: Universal Access
                     kb.append([{"text": "📂 Export"}, {"text": "📜 History"}])
                     
-                    # Row 4: Owner Only (System Settings)
-                    # HIDDEN for Admins and regular users
                     if is_owner:
                         kb.append([{"text": "🔐 Admin Panel"}])
 
@@ -76,17 +86,15 @@ class HandlerMixin:
                 # 🌲 ACTION ROUTING
                 # ====================================================
 
-                # --- 🟢 VIEWING (Available to All) ---
+                # --- 🟢 VIEWING ---
                 elif txt == "📋 All Numbers":
                     ack = await self.bot.send_to_chat(cid, "🔄 <i>Fetching numbers...</i>")
                     mid = ack["result"]["message_id"]
                     
-                    # Sync assigned accounts
                     visible_emails = await self.get_visible_emails(user_id)
                     tasks = [self.workers[e].sync_numbers() for e in visible_emails if self.workers.get(e)]
                     if tasks: await asyncio.gather(*tasks)
                     
-                    # Render the list (Implementation in bot_callbacks or main mixin)
                     await self.render_global_numbers(cid, mid, 0, user_id, user_data, is_owner)
 
                 elif txt == "🔢 Choose Number":
@@ -99,16 +107,15 @@ class HandlerMixin:
 
                     await self.show_choose_range_root(cid, mid, user_id, is_admin)
 
-                # --- 🟡 MANAGEMENT (Admin & Owner Only) ---
+                # --- 🟡 MANAGEMENT ---
                 elif txt == "➕ Add Number":
-                    if not is_admin: return # Safety check
+                    if not is_admin: return 
                     visible_emails = await self.get_visible_emails(user_id)
                     
                     if not visible_emails:
                         await self.bot.send_to_chat(cid, "❌ No accounts assigned.")
                         return
 
-                    # Smart Jump: If only 1 account, skip the selection menu
                     if len(visible_emails) == 1:
                         email = visible_emails[0]
                         self.user_states[user_id] = {
@@ -124,7 +131,7 @@ class HandlerMixin:
                     if not is_admin: return
                     await self.show_remove_menu(cid, None, user_id, is_admin)
 
-                # --- 🔵 UTILITIES (Available to All) ---
+                # --- 🔵 UTILITIES ---
                 elif txt == "📂 Export":
                     await self.show_main_export_menu(cid, None, user_id, user_data, is_admin)
 
@@ -135,25 +142,23 @@ class HandlerMixin:
 
                     for email in visible_emails:
                         w = self.workers.get(email)
-                        # Access history from worker
                         if w and hasattr(w, "otp_history") and w.otp_history:
                             alias = self.get_account_alias(email, visible_emails, user_id, is_admin)
                             for otp in w.otp_history[-5:]:
                                 found_any = True
-                                code = otp.get("code", "---")
-                                sender = otp.get("sender", "Service")
+                                code = otp.get("otp_code", "---")
+                                sender = otp.get("originator", "Service")
                                 history_text += f"• <code>{code}</code> | {sender} ({alias})\n"
                             
                     if not found_any: history_text += "<i>No recent OTPs found.</i>"
                     await self.bot.send_to_chat(cid, history_text)
 
-                # --- 🔴 SYSTEM (Owner Only) ---
+                # --- 🔴 SYSTEM ---
                 elif txt == "🔐 Admin Panel":
                     if not is_owner: 
                         await self.bot.send_to_chat(cid, "⛔ <b>Owner Only.</b>")
                         return
                     
-                    # Inline Menu for Admin Tasks
                     kb = {
                         "inline_keyboard": [
                             [{"text": "👤 User Settings", "callback_data": "usr:main"}, 
@@ -169,24 +174,28 @@ class HandlerMixin:
                 elif user_id in self.user_states:
                     await self.handle_state_input(cid, txt, user_id, user_data, is_owner)
                 
-                # --- Quick Setup Helpers (Reply Logic) ---
-                elif "Enter Telegram User ID" in msg.get("reply_to_message", {}).get("text", ""):
-                    if not is_owner: return
-                    try:
-                        uid = int(txt)
-                        await self.db.add_user(uid)
-                        await self.bot.send_to_chat(cid, f"✅ User <code>{uid}</code> Added.")
-                    except: await self.bot.send_to_chat(cid, "❌ Invalid ID.")
+                # --- Quick Setup Helpers ---
+                # Check reply_to first to ensure it exists
+                elif reply_to and "text" in reply_to:
+                    reply_text = reply_to["text"]
+                    
+                    if "Enter Telegram User ID" in reply_text:
+                        if not is_owner: return
+                        try:
+                            uid = int(txt)
+                            await self.db.add_user(uid)
+                            await self.bot.send_to_chat(cid, f"✅ User <code>{uid}</code> Added.")
+                        except: await self.bot.send_to_chat(cid, "❌ Invalid ID.")
 
-                elif "Enter Email" in msg.get("reply_to_message", {}).get("text", ""):
-                    if not is_owner: return
-                    if ":" in txt:
-                        email, pwd = txt.split(":", 1)
-                        await self.db.add_account(email.strip(), pwd.strip())
-                        await self.spawn_worker(email.strip(), pwd.strip())
-                        await self.bot.send_to_chat(cid, f"✅ Account <code>{email.strip()}</code> Started.")
-                    else:
-                        await self.bot.send_to_chat(cid, "❌ Use: <code>email:password</code>")
+                    elif "Enter: email:password" in reply_text:
+                        if not is_owner: return
+                        if ":" in txt:
+                            email, pwd = txt.split(":", 1)
+                            await self.db.add_account(email.strip(), pwd.strip())
+                            await self.spawn_worker(email.strip(), pwd.strip())
+                            await self.bot.send_to_chat(cid, f"✅ Account <code>{email.strip()}</code> Started.")
+                        else:
+                            await self.bot.send_to_chat(cid, "❌ Use: <code>email:password</code>")
 
         except Exception as e:
             logging.error(f"Handler Error: {e}", exc_info=True)
@@ -226,5 +235,35 @@ class HandlerMixin:
                 targets = state.get("target", [])
                 term_names = state.get("term_names", [])
                 
-                asyncio.create_task(self.execute_add_process(cid, count, term_names, targets, user_data, is_owner))
+                # Note: We need to define execute_add_process or call worker logic here
+                # For this snippet, assuming worker.add_numbers is called directly or mapped
+                asyncio.create_task(self.execute_add_process(cid, count, term_names, targets))
                 del self.user_states[user_id]
+
+    # Added helper to link back to worker logic
+    async def execute_add_process(self, cid, count, term_names, targets):
+        status_msg = await self.bot.send_to_chat(cid, "⏳ Starting...")
+        msg_id = status_msg["result"]["message_id"]
+        
+        report = []
+        for email in targets:
+            w = self.workers.get(email)
+            if not w:
+                report.append(f"❌ {email}: Offline")
+                continue
+                
+            # Define a progress callback for the worker
+            async def progress(idx, total, txt):
+                if idx % 5 == 0: # Update every 5 items to avoid spam
+                    await self.bot.edit_msg(cid, msg_id, f"🔄 {email}: {idx}/{total}\n{txt}")
+
+            # Loop Logic
+            total_added = 0
+            for i in range(count):
+                res = await w.add_numbers(term_names, progress_callback=progress)
+                total_added += res['success']
+                await asyncio.sleep(1)
+            
+            report.append(f"✅ {email}: Added {total_added} numbers.")
+            
+        await self.bot.edit_msg(cid, msg_id, "\n".join(report))
