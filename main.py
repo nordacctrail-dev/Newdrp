@@ -9,6 +9,7 @@ from aiogram.enums import ParseMode
 import config
 from database import Database
 from core.worker import IvasmsWorker
+from core.notifier import Notifier
 from bot_handlers import HandlerMixin
 from bot_callbacks import CallbackMixin
 from bot_menus import MenuMixin
@@ -27,7 +28,6 @@ class BotWrapper:
     async def get_updates(self, offset, timeout):
         return await self.real_bot.get_updates(offset=offset, timeout=timeout)
 
-    # Generic API caller used by Mixins
     async def api(self, method, data):
         try:
             if method == "sendMessage":
@@ -37,15 +37,17 @@ class BotWrapper:
         except Exception as e:
             logging.error(f"API Error ({method}): {e}")
 
-    # Shortcuts used in Mixins
     async def send_to_chat(self, chat_id, text, reply_markup=None):
-        return await self.real_bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+        try:
+            return await self.real_bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+        except Exception as e:
+            logging.error(f"Send Error: {e}")
 
     async def edit_msg(self, chat_id, msg_id, text, reply_markup=None):
         try:
             await self.real_bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=text, reply_markup=reply_markup)
         except Exception: 
-            pass # Ignore "message is not modified" errors
+            pass 
 
     async def delete_msg(self, chat_id, msg_id):
         try: await self.real_bot.delete_message(chat_id, msg_id)
@@ -64,8 +66,6 @@ class IvasmsMultiBot(HandlerMixin, CallbackMixin, MenuMixin):
         self.cfg = config
         self.bot = None
         self.db = Database()
-        
-        # Worker Registry: { "email@gmail.com": IvasmsWorkerInstance }
         self.workers = {} 
 
     async def start(self):
@@ -79,11 +79,12 @@ class IvasmsMultiBot(HandlerMixin, CallbackMixin, MenuMixin):
         # 3. Restore Accounts from DB
         logging.info("🔄 Restoring Accounts...")
         accounts = await self.db.get_all_accounts()
-        if not accounts:
-            logging.warning("⚠️ No accounts found in DB. Add one via Admin Panel or Config.")
         
         for acc in accounts:
             await self.spawn_worker(acc['email'], acc['password'])
+
+        if not self.workers:
+            logging.warning("⚠️ No accounts loaded. Add one via the Admin Panel.")
 
         # 4. Start Polling Loop
         logging.info("🚀 Bot Started! Waiting for updates...")
@@ -93,10 +94,8 @@ class IvasmsMultiBot(HandlerMixin, CallbackMixin, MenuMixin):
                 updates = await self.bot.get_updates(offset=offset, timeout=20)
                 for u in updates:
                     offset = u.update_id + 1
-                    # Convert Update object to dict for Mixin compatibility
                     u_dict = u.model_dump(exclude_none=True)
                     
-                    # aiogram v3 specific mapping
                     if u.callback_query:
                         u_dict["callback_query"]["message"]["chat"]["id"] = u.callback_query.message.chat.id
                         u_dict["callback_query"]["message"]["message_id"] = u.callback_query.message.message_id
@@ -118,14 +117,16 @@ class IvasmsMultiBot(HandlerMixin, CallbackMixin, MenuMixin):
         if email in self.workers: return
         
         logging.info(f"👨‍💻 Spawning Worker: {email}")
-        worker = IvasmsWorker(email, password)
+        
+        # --- FIXED: Added notification_callback ---
+        worker = IvasmsWorker(email, password, notification_callback=self.distribute_otp)
         self.workers[email] = worker
         
-        # Launch Browser in Background
-        asyncio.create_task(worker.start_browser())
+        # --- FIXED: Changed start_browser() to start() ---
+        asyncio.create_task(worker.start())
 
     async def kill_worker(self, email):
-        """Stops a worker and closes its browser."""
+        """Stops a worker."""
         if email in self.workers:
             logging.info(f"🛑 Stopping Worker: {email}")
             w = self.workers.pop(email)
@@ -134,27 +135,40 @@ class IvasmsMultiBot(HandlerMixin, CallbackMixin, MenuMixin):
                 try: w.driver.quit()
                 except: pass
 
-    # Helper: Get aliases for menus
-    def get_account_alias(self, target_email, visible_emails, user_id, is_admin):
-        if user_id == self.cfg.OWNER_ID:
-            return target_email.split('@')[0]
-        try:
-            sorted_emails = sorted(visible_emails)
-            index = sorted_emails.index(target_email)
-            return f"Account {index + 1}"
-        except ValueError:
-            return "Unknown"
+    # ====================================================
+    # 📨 OTP DISTRIBUTOR
+    # ====================================================
+    async def distribute_otp(self, account_email, otp_data):
+        """
+        Called by Worker when an OTP arrives.
+        Broadcasts it to all users with permission.
+        """
+        logging.info(f"🔔 Distributing OTP for {account_email}")
+        
+        # 1. Get all users
+        all_users = await self.db.get_all_users()
+        recipients = set()
+        
+        # 2. Always include Owner
+        if self.cfg.OWNER_ID != 0:
+            recipients.add(self.cfg.OWNER_ID)
 
-    # Helper: Permission Check
-    async def get_visible_emails(self, user_id):
-        if user_id == self.cfg.OWNER_ID:
-            return list(self.workers.keys())
-        
-        user = await self.db.get_user(user_id)
-        if not user: return []
-        
-        perms = user.get("permissions", [])
-        return [e for e in perms if e in self.workers]
+        # 3. Check permissions
+        for user in all_users:
+            uid = user['chat_id']
+            perms = user.get('permissions', [])
+            if account_email in perms:
+                recipients.add(uid)
+
+        # 4. Format Message
+        msg_text = Notifier.format_otp_message(otp_data)
+
+        # 5. Send
+        for chat_id in recipients:
+            try:
+                await self.bot.send_to_chat(chat_id, msg_text)
+            except Exception as e:
+                logging.error(f"Failed to send OTP to {chat_id}: {e}")
 
 if __name__ == "__main__":
     try:
