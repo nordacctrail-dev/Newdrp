@@ -10,14 +10,16 @@ import config
 from core.database import db  # Database Instance
 from utils import log
 
-# ===================== PARSING LOGIC =====================
+# ===================== PARSING HELPERS =====================
 
+# Possible keys for the Service Name (CLI)
 CLI_KEYS = [
     "termination_name", "cli", "sender", "from", "source", "origin", 
     "brand", "app", "application", "service", "channel", "display", 
     "term", "termination", "display_name"
 ]
 
+# Possible keys for the Termination ID (needed to buy)
 TERMID_KEYS = [
     "termination_id", "terminationId", "term_id", "termId", "tid", 
     "ter_id", "sender_id", "cli_id", "identity", "id"
@@ -32,6 +34,7 @@ def try_json(s):
 def find_json_array_in_text(text: str):
     """
     Robust extraction of [ "event", {data} ] from raw Socket.IO frames.
+    Handles messy prefixes like '42' or numeric codes.
     """
     if not isinstance(text, str): return None
     idx = text.find("[")
@@ -41,7 +44,7 @@ def find_json_array_in_text(text: str):
     parsed = try_json(substr)
     if isinstance(parsed, list): return parsed
     
-    # Fallback: Try finding the closing bracket if data is messy
+    # Fallback: Try finding the closing bracket if data has trailing garbage
     last = substr.rfind("]")
     if last != -1:
         cand = substr[: last + 1]
@@ -120,7 +123,12 @@ class TerminationScanner:
             "Microsoft": r"microsoft",
             "Uber": r"uber",
             "Netflix": r"netflix",
-            "Apple": r"apple"
+            "Apple": r"apple",
+            "Discord": r"discord",
+            "Viber": r"viber",
+            "Snapchat": r"snapchat",
+            "LinkedIn": r"linkedin",
+            "PayPal": r"paypal"
         }
 
     async def start(self):
@@ -132,14 +140,18 @@ class TerminationScanner:
             params = {'EIO': '4', 'transport': 'websocket'}
             url = f"{self.ws_url}?{urlencode(params)}"
             
-            headers = config.NUMBERS_HEADERS.copy()
-            headers["Host"] = "ivasms.com:2087"
-            headers["Origin"] = "https://www.ivasms.com"
+            # --- BUILD HEADERS FROM BROWSER STATE ---
+            headers = {
+                "Host": "ivasms.com:2087",
+                "Origin": "https://www.ivasms.com",
+            }
             
-            # Use captured session from browser if available
+            # Inject Cookies if available
             if utils.current_cookies:
                 cookie_str = "; ".join([f"{k}={v}" for k,v in utils.current_cookies.items()])
                 headers["Cookie"] = cookie_str
+            
+            # Inject User-Agent if available
             if getattr(utils, "current_user_agent", None):
                 headers["User-Agent"] = utils.current_user_agent
 
@@ -158,11 +170,13 @@ class TerminationScanner:
                                 break
 
             except Exception as e:
-                # If 403, it means Cloudflare is blocking the Scanner.
-                # We signal the Browser Thread to solve the captcha.
+                # If 403, Cloudflare is blocking the Scanner.
+                # Signal the Browser Thread to solve the challenge.
                 if "403" in str(e):
                     log(f"📡 Scanner 403 Forbidden. Signaling Browser...", "WARN")
                     utils.force_refresh_cookies = True
+                else:
+                    log(f"Scanner Connection Error: {e}", "ERROR")
                 
                 await asyncio.sleep(5)
 
@@ -180,28 +194,29 @@ class TerminationScanner:
                 # We expect: ["send_message_test", {DATA}]
                 if data_arr and len(data_arr) > 1:
                     event_name = data_arr[0]
+                    # We listen for 'send_message_test' as it contains full termination info
                     if event_name == "send_message_test":
                         await self._process_payload(data_arr[1])
                         
                 elif data_arr and len(data_arr) > 0:
-                    # Fallback for weird frames
+                    # Fallback for unexpected frame structures
                     await self._process_payload(data_arr[0])
             except: 
                 pass
 
     async def _process_payload(self, payload: dict):
         """
-        Extracts ID and Name, updates Database Leaderboard.
+        Extracts ID and Name, categorizes, and updates Database.
         """
-        # 1. Extract ID (Critical)
+        # 1. Extract ID (Critical - cannot buy without this)
         term_id = extract_termid_from_payload(payload)
         if not term_id: return
 
         # 2. Extract Name & Message
-        raw_name = extract_cli_from_payload(payload)   # e.g. "ZAMBIA 716" or "Huawei"
+        raw_name = extract_cli_from_payload(payload)   # e.g. "ZAMBIA 716"
         msg_text = extract_message_from_payload(payload)
         
-        # 3. Categorize (e.g. "Huawei" -> "Other", "Apple" -> "Apple")
+        # 3. Categorize Service (e.g. "WhatsApp", "Facebook")
         detected_service = "Other"
         combined_text = f"{raw_name} {msg_text}"
         
@@ -210,8 +225,11 @@ class TerminationScanner:
                 detected_service = service
                 break
         
-        # Display Name Logic: Prefer detected service if found, else raw name
+        # 4. Determine Display Name
+        # If we didn't find a service, use the Raw Name (CLI).
+        # If the Raw Name is empty, default to "Unknown Range".
         display_name = raw_name if raw_name else "Unknown Range"
 
-        # 4. Save to MongoDB (This populates the "Add Range" menu)
+        # 5. Save to MongoDB (Upsert)
+        # This keeps the 'Hot Ranges' list in the UI updated.
         await db.record_scanner_hit(term_id, display_name, detected_service)
