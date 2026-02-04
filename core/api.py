@@ -97,7 +97,7 @@ async def fetch_numbers():
                     
                     async with session.get(url, headers=headers, params=params) as resp:
                         # --- CLOUDFLARE DETECTION & RECOVERY ---
-                        if resp.status == 403 or resp.status == 503 resp.status == 401:
+                        if resp.status == 403 or resp.status == 503 or resp.status == 401:
                             if attempt == 0:
                                 log("⚠️ API hit 401/403/503 - Triggering Browser Refresh...", "WARN")
                                 state.force_refresh_cookies = True
