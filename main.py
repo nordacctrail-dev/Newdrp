@@ -16,7 +16,7 @@ from aiogram.filters import Command
 import config
 import state
 from core.browser import browser_thread_target
-from core.websocket import websocket_loop
+from core.websocket import websocket_loop, credential_watchdog
 from core import api
 
 # Logging Setup
@@ -25,12 +25,12 @@ bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
 # ===================== SETTINGS =====================
-PAGE_SIZE = 20  # Updated to 20 items per page
+PAGE_SIZE = 20
 
 # ===================== KEYBOARDS =====================
 
 def get_main_menu():
-    """Persistent Bottom Menu (Hybrid UI)"""
+    """Persistent Bottom Menu"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📋 All Numbers"), KeyboardButton(text="🔎 Choose Range")],
@@ -42,41 +42,23 @@ def get_main_menu():
     )
 
 def get_cancel_kb():
-    """Inline Cancel Button"""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Cancel", callback_data="cancel_action")]
     ])
 
 def get_pagination_kb(prefix: str, current_page: int, total_pages: int, extra_data: str = ""):
-    """
-    Generates Previous/Next buttons for pagination.
-    Data format: 'prefix:extra_data:page'
-    """
     buttons = []
     
-    # PREVIOUS BUTTON
     if current_page > 1:
         data_str = f"{prefix}:{extra_data}:{current_page-1}" if extra_data else f"{prefix}:{current_page-1}"
-        buttons.append(InlineKeyboardButton(
-            text="⬅️ Prev", 
-            callback_data=data_str
-        ))
+        buttons.append(InlineKeyboardButton(text="⬅️ Prev", callback_data=data_str))
     
-    # INDICATOR
-    buttons.append(InlineKeyboardButton(
-        text=f"{current_page}/{total_pages}", 
-        callback_data="noop"
-    ))
+    buttons.append(InlineKeyboardButton(text=f"{current_page}/{total_pages}", callback_data="noop"))
     
-    # NEXT BUTTON
     if current_page < total_pages:
         data_str = f"{prefix}:{extra_data}:{current_page+1}" if extra_data else f"{prefix}:{current_page+1}"
-        buttons.append(InlineKeyboardButton(
-            text="Next ➡️", 
-            callback_data=data_str
-        ))
+        buttons.append(InlineKeyboardButton(text="Next ➡️", callback_data=data_str))
     
-    # Bottom row
     if prefix == "view_rng":
         back_btn = [InlineKeyboardButton(text="🔙 Back to Ranges", callback_data="back_to_ranges")]
         return InlineKeyboardMarkup(inline_keyboard=[buttons, back_btn])
@@ -87,10 +69,11 @@ def get_pagination_kb(prefix: str, current_page: int, total_pages: int, extra_da
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
+    # UPDATED: Cleaner welcome message, no mention of Selenium
     await message.answer(
-        "🤖 <b>IVASMS Bot Ready</b>\n"
-        "Session monitored via Selenium.\n"
-        "Use the menu below to manage numbers:",
+        "👋 <b>Welcome to IVASMS Bot!</b>\n\n"
+        "I am ready to help you manage your numbers and receive OTPs.\n"
+        "👇 <b>Use the menu below to get started:</b>",
         reply_markup=get_main_menu(),
         parse_mode="HTML"
     )
@@ -99,10 +82,9 @@ async def cmd_start(message: types.Message):
 async def cmd_menu(message: types.Message):
     await message.answer("📂 <b>Main Menu</b>", reply_markup=get_main_menu(), parse_mode="HTML")
 
-# ===================== ALL NUMBERS HANDLER (📋 All Numbers) =====================
+# ===================== ALL NUMBERS & RANGES =====================
 
 async def show_all_numbers(message_or_call, page=1, edit=False):
-    """Fetches and displays ALL numbers from ALL ranges in a single list."""
     if isinstance(message_or_call, types.Message):
         status_msg = await message_or_call.answer("🔄 Fetching all numbers...")
     else:
@@ -111,9 +93,8 @@ async def show_all_numbers(message_or_call, page=1, edit=False):
     if not edit: 
         ok, msg = await api.fetch_numbers()
         if not ok:
-            text = f"⚠️ <b>Error:</b> {msg}"
-            if edit: await status_msg.edit_text(text, parse_mode="HTML")
-            else: await status_msg.edit_text(text, parse_mode="HTML")
+            if edit: await status_msg.edit_text(f"⚠️ <b>Error:</b> {msg}", parse_mode="HTML")
+            else: await status_msg.edit_text(f"⚠️ <b>Error:</b> {msg}", parse_mode="HTML")
             return
 
     if not hasattr(state, "numbers_data") or not state.numbers_data:
@@ -132,28 +113,21 @@ async def show_all_numbers(message_or_call, page=1, edit=False):
     total_items = len(all_items)
     total_pages = math.ceil(total_items / PAGE_SIZE)
     if total_pages == 0: total_pages = 1
-    
     if page > total_pages: page = total_pages
     
     start_idx = (page - 1) * PAGE_SIZE
     end_idx = start_idx + PAGE_SIZE
-    
     current_items = all_items[start_idx:end_idx]
     
-    text = f"📋 <b>All Numbers</b> (Page {page}/{total_pages})\n"
-    text += f"Total: {total_items} numbers\n\n"
-    
+    text = f"📋 <b>All Numbers</b> (Page {page}/{total_pages})\nTotal: {total_items} numbers\n\n"
     for item in current_items:
         num = item['number']
         if not num.startswith("+"): num = f"+{num}"
         text += f"• <code>{num}</code> ({item['range_name']})\n"
 
     kb = get_pagination_kb("view_all", page, total_pages, extra_data="")
-
-    if edit:
-        await status_msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
-    else:
-        await status_msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    if edit: await status_msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    else: await status_msg.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
 @dp.message(F.text == "📋 All Numbers")
 async def handle_all_numbers_btn(message: types.Message):
@@ -162,17 +136,9 @@ async def handle_all_numbers_btn(message: types.Message):
 @dp.callback_query(F.data.startswith("view_all:"))
 async def view_all_numbers(callback: types.CallbackQuery):
     parts = callback.data.split(":")
-    
-    if len(parts) == 3:
-        page = int(parts[2])
-    else:
-        page = int(parts[1])
-
+    page = int(parts[2]) if len(parts) == 3 else int(parts[1])
     await show_all_numbers(callback, page=page, edit=True)
     await callback.answer()
-
-
-# ===================== RANGES HANDLER (🔎 Choose Range) =====================
 
 async def show_ranges(message_or_call, edit=False):
     if isinstance(message_or_call, types.Message):
@@ -183,9 +149,8 @@ async def show_ranges(message_or_call, edit=False):
     if not edit:
         ok, msg = await api.fetch_numbers()
         if not ok:
-            text = f"⚠️ <b>Error:</b> {msg}\n\nIf it's Cloudflare, it will auto-solve in the browser."
-            if edit: await status_msg.edit_text(text, parse_mode="HTML")
-            else: await status_msg.edit_text(text, parse_mode="HTML")
+            if edit: await status_msg.edit_text(f"⚠️ {msg}", parse_mode="HTML")
+            else: await status_msg.edit_text(f"⚠️ {msg}", parse_mode="HTML")
             return
 
     if not hasattr(state, "numbers_data") or not state.numbers_data:
@@ -194,19 +159,15 @@ async def show_ranges(message_or_call, edit=False):
         else: await status_msg.edit_text(text, parse_mode="HTML")
         return
 
-    # --- SINGLE COLUMN LAYOUT ---
     buttons = []
     for rng in sorted(state.numbers_data.keys()):
         count = len(state.numbers_data[rng])
         btn_text = f"{rng} ({count})"
-        # Direct append for single column
         buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"view_rng:{rng}:1")])
 
     text = "🔎 <b>Select a Range</b> to view numbers:"
-    if edit:
-        await status_msg.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
-    else:
-        await status_msg.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+    if edit: await status_msg.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+    else: await status_msg.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
 
 @dp.message(F.text == "🔎 Choose Range")
 async def handle_ranges_btn(message: types.Message):
@@ -234,20 +195,15 @@ async def view_range_numbers(callback: types.CallbackQuery):
     
     start_idx = (page - 1) * PAGE_SIZE
     end_idx = start_idx + PAGE_SIZE
-    
     current_items = items[start_idx:end_idx]
     
-    text = f"📂 <b>Range:</b> {range_name} (Page {page}/{total_pages})\n"
-    text += f"Total: {total_items} numbers\n\n"
-    
+    text = f"📂 <b>Range:</b> {range_name} (Page {page}/{total_pages})\nTotal: {total_items} numbers\n\n"
     for item in current_items:
         num = item['number']
-        if not num.startswith("+"):
-            num = f"+{num}"
+        if not num.startswith("+"): num = f"+{num}"
         text += f"• <code>{num}</code>\n"
         
     kb = get_pagination_kb("view_rng", page, total_pages, range_name)
-    
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
@@ -255,18 +211,18 @@ async def view_range_numbers(callback: types.CallbackQuery):
 async def noop_handler(callback: types.CallbackQuery):
     await callback.answer(f"Page {callback.message.reply_markup.inline_keyboard[0][1].text}")
 
-# ===================== ADD NUMBER HANDLERS =====================
+# ===================== ADD NUMBER =====================
 
 @dp.message(F.text == "➕ Add Number")
 async def ask_add_number(message: types.Message):
     state.add_number_pending[message.chat.id] = True
     await message.answer(
-        "➕ <b>Send the Termination ID</b> to add (e.g. <code>980693</code>):",
+        "➕ <b>Send the Termination ID</b> to add:",
         reply_markup=get_cancel_kb(),
         parse_mode="HTML"
     )
 
-# ===================== REMOVE NUMBER HANDLERS =====================
+# ===================== REMOVE NUMBER (ONE CLICK) =====================
 
 @dp.message(F.text == "🗑 Remove Numbers")
 async def ask_remove_range(message: types.Message):
@@ -284,42 +240,27 @@ async def ask_remove_range(message: types.Message):
     buttons = []
     for rng in sorted(state.numbers_data.keys()):
         count = len(state.numbers_data[rng])
-        buttons.append([InlineKeyboardButton(text=f"🗑 {rng} ({count})", callback_data=f"ask_rm:{rng}")])
+        # Direct deletion callback (skips confirmation)
+        buttons.append([InlineKeyboardButton(text=f"🗑 {rng} ({count})", callback_data=f"do_rm:{rng}")])
     
     buttons.append([InlineKeyboardButton(text="❌ Cancel", callback_data="cancel_action")])
     
     await status_msg.edit_text(
-        "🗑 <b>Select a Range to WIPE</b> all numbers from:",
+        "🗑 <b>Click a Range to DELETE IMMEDIATELY:</b>",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode="HTML"
     )
 
-@dp.callback_query(F.data.startswith("ask_rm:"))
-async def confirm_remove(callback: types.CallbackQuery):
-    range_name = callback.data.split(":")[1]
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ YES, DELETE ALL", callback_data=f"do_rm:{range_name}")],
-        [InlineKeyboardButton(text="❌ No, Cancel", callback_data="cancel_action")]
-    ])
-    
-    await callback.message.edit_text(
-        f"⚠️ <b>CONFIRM DELETION</b> ⚠️\n\n"
-        f"Are you sure you want to remove ALL numbers in range <b>{range_name}</b>?",
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
-    await callback.answer()
-
 @dp.callback_query(F.data.startswith("do_rm:"))
 async def execute_remove(callback: types.CallbackQuery):
     range_name = callback.data.split(":")[1]
-    await callback.message.edit_text(f"⏳ Removing numbers from {range_name}...")
+    
+    await callback.message.edit_text(f"⏳ <b>Deleting {range_name}...</b>", parse_mode="HTML")
     
     ok, msg = await api.remove_range(range_name)
     
     if ok:
-        await callback.message.edit_text(f"✅ <b>Success:</b> {msg}", parse_mode="HTML")
+        await callback.message.edit_text(f"✅ <b>Deleted:</b> {msg}", parse_mode="HTML")
     else:
         await callback.message.edit_text(f"❌ <b>Failed:</b> {msg}", parse_mode="HTML")
     await callback.answer()
@@ -330,32 +271,25 @@ async def cancel_handler(callback: types.CallbackQuery):
     await callback.message.edit_text("❌ Action Cancelled.")
     await callback.answer("Cancelled")
 
-# ===================== GENERIC TEXT HANDLER =====================
+# ===================== HISTORY & TEXT HANDLER =====================
 
 @dp.message(F.text)
 async def handle_text(message: types.Message):
     if state.add_number_pending.get(message.chat.id):
         term_id = message.text.strip()
-        
         if not term_id.isdigit():
-            await message.answer("⚠️ Invalid ID. Please send numbers only (e.g. <code>123456</code>).", parse_mode="HTML")
+            await message.answer("⚠️ Invalid ID. Numbers only.", parse_mode="HTML")
             return
-            
         status_msg = await message.answer(f"⏳ Adding <b>{term_id}</b>...", parse_mode="HTML")
-        
         ok, msg = await api.add_number(term_id)
         state.add_number_pending.pop(message.chat.id, None)
-        
-        if ok:
-            await status_msg.edit_text(f"✅ {msg}", parse_mode="HTML")
-        else:
-            await status_msg.edit_text(f"❌ {msg}", parse_mode="HTML")
+        if ok: await status_msg.edit_text(f"✅ {msg}", parse_mode="HTML")
+        else: await status_msg.edit_text(f"❌ {msg}", parse_mode="HTML")
         return
 
     if message.text == "📊 Status":
         connected = "✅ YES" if state.current_livesms_token else "❌ NO"
-        ua_stat = "✅ Captured" if state.current_user_agent else "⚠️ Missing (Wait for browser)"
-        
+        ua_stat = "✅ Captured" if state.current_user_agent else "⚠️ Missing"
         msg = (
             f"📊 <b>Bot Status</b>\n"
             f"• WebSocket: {connected}\n"
@@ -369,25 +303,24 @@ async def handle_text(message: types.Message):
             await message.answer("📜 No OTPs yet.")
         else:
             txt = "📜 <b>Recent OTPs:</b>\n\n"
-            for otp in state.otp_history[-5:]:
+            for otp in state.otp_history[-10:]:
                 code = otp.get('otp_code', '-')
                 sender = otp.get('originator', 'Unknown')
-                txt += f"• <code>{code}</code> from <code>{sender}</code>\n"
+                recipient = otp.get('recipient', 'Unknown') # Shows which number received the OTP
+                
+                txt += f"• <code>{code}</code>\n   To: <b>{recipient}</b> | From: {sender}\n\n"
+            
             await message.answer(txt, parse_mode="HTML")
-
-# ===================== STARTUP =====================
 
 async def main():
     t = threading.Thread(target=browser_thread_target, daemon=True)
     t.start()
-    
     asyncio.create_task(websocket_loop())
-    
+    asyncio.create_task(credential_watchdog())
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     if not hasattr(state, "add_number_pending"):
         state.add_number_pending = {}
-        
     asyncio.run(main())
