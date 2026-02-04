@@ -134,7 +134,7 @@ def login_sequence(bot):
             update_cookies_and_tokens(bot)
             
             cookie_json = json.dumps(state.current_cookies, indent=2)
-                        send_sync_message(f"✅ <b>Login Successful! </b>\n<pre>{cookie_json}</pre>")
+            send_sync_message(f"✅ <b>Login Successful! </b>\n<pre>{cookie_json}</pre>")
             return True
         time.sleep(1)
     return False
