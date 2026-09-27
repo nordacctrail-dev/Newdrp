@@ -1,1153 +1,468 @@
-const mangayomiSources = [
-  {
+const mangayomiSources = [{
     "name": "Towkai",
-    "id": 918273645,
-    "baseUrl": "http://mm.towkai.com",
     "lang": "en",
-    "typeSource": "single",
-    "iconUrl": "http://mm.towkai.com/uploads/system_logo/logo_629599c462f85.png",
-    "dateFormat": "",
-    "dateFormatLocale": "",
-    "isNsfw": false,
-    "hasCloudflare": false,
-    "sourceCodeUrl": "https://raw.githubusercontent.com/nordacctrail-dev/Newdrp/main/towkai.js",
+    "baseUrl": "http://mm.towkai.com",
     "apiUrl": "",
-    "version": "1.0.0",
-    "isManga": false,
+    "iconUrl": "http://mm.towkai.com/uploads/system_logo/logo_629599c462f85.png",
+    "typeSource": "single",
     "itemType": 1,
-    "isFullData": false,
-    "appMinVerReq": "0.5.0",
-    "additionalParams": "",
-    "sourceCodeLanguage": 1,
-    "notes": "",
-    "pkgPath": "Newdrp/main/towkai.js",
-  },
-];
+    "isNsfw": false,
+    "version": "1.0.0",
+    "pkgPath": "towkai/default",
+    "notes": ""
+}];
 
 class DefaultExtension extends MProvider {
 
-  // ───────────────────────────────────────────────────────────────────────────
-  // Basic helpers
-  // ───────────────────────────────────────────────────────────────────────────
+    // -----------------------------
+    // Helpers
+    // -----------------------------
 
-  get ua() {
-    return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36";
-  }
+    cleanText(text) {
+        if (!text) return "";
 
-  getHeaders(referer) {
-    return {
-      "User-Agent": this.ua,
-      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-      "Accept-Language": "en-US,en;q=0.9",
-      "Referer": referer || this.source.baseUrl + "/",
-    };
-  }
-
-  absoluteUrl(url) {
-    if (!url) return "";
-
-    url = url.trim();
-
-    if (url.startsWith("http://") || url.startsWith("https://")) {
-      return url;
-    }
-
-    if (url.startsWith("//")) {
-      return "http:" + url;
-    }
-
-    if (url.startsWith("/")) {
-      return this.source.baseUrl + url;
-    }
-
-    return this.source.baseUrl + "/" + url;
-  }
-
-  cleanText(text) {
-    if (!text) return "";
-
-    return text
-      .replace(/<script[\s\S]*?<\/script>/gi, "")
-      .replace(/<style[\s\S]*?<\/style>/gi, "")
-      .replace(/<[^>]+>/g, " ")
-      .replace(/&nbsp;/gi, " ")
-      .replace(/&amp;/gi, "&")
-      .replace(/&quot;/gi, "\"")
-      .replace(/&#39;/gi, "'")
-      .replace(/&#x27;/gi, "'")
-      .replace(/&lt;/gi, "<")
-      .replace(/&gt;/gi, ">")
-      .replace(/\s+/g, " ")
-      .trim();
-  }
-
-  decodeHtml(text) {
-    if (!text) return "";
-
-    return text
-      .replace(/&amp;/gi, "&")
-      .replace(/&quot;/gi, "\"")
-      .replace(/&#39;/gi, "'")
-      .replace(/&#x27;/gi, "'")
-      .replace(/&lt;/gi, "<")
-      .replace(/&gt;/gi, ">")
-      .replace(/&nbsp;/gi, " ")
-      .trim();
-  }
-
-  // ───────────────────────────────────────────────────────────────────────────
-  // HTTP
-  // ───────────────────────────────────────────────────────────────────────────
-
-  async getPage(url, referer) {
-    const client = new Client();
-
-    try {
-      const res = await client.get(
-        url,
-        this.getHeaders(referer || this.source.baseUrl + "/")
-      );
-
-      if (!res) return "";
-      if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 400)) {
-        return "";
-      }
-
-      return res.body || "";
-    } catch (e) {
-      return "";
-    }
-  }
-
-  // ───────────────────────────────────────────────────────────────────────────
-  // Parse movie / series cards
-  // ───────────────────────────────────────────────────────────────────────────
-
-  parseCards(html) {
-    const list = [];
-    const seen = {};
-
-    if (!html) return list;
-
-    const blocks = html
-      .split('class="latest-movie-img-container')
-      .slice(1);
-
-    for (const block of blocks) {
-
-      let name = "";
-      let url = "";
-      let imageUrl = "";
-
-      // Poster
-      if (block.includes('data-src="')) {
-        imageUrl = block
-          .substringAfter('data-src="')
-          .substringBefore('"')
-          .trim();
-      }
-
-      // Fallback poster
-      if (!imageUrl && block.includes('src="')) {
-        imageUrl = block
-          .substringAfter('src="')
-          .substringBefore('"')
-          .trim();
-      }
-
-      // Watch URL
-      if (block.includes('href="')) {
-        const hrefs = block.split('href="');
-
-        for (let i = 1; i < hrefs.length; i++) {
-          const candidate = hrefs[i]
-            .substringBefore('"')
+        return text
+            .replace(/<[^>]*>/g, " ")
+            .replace(/&nbsp;/gi, " ")
+            .replace(/&amp;/gi, "&")
+            .replace(/&quot;/gi, '"')
+            .replace(/&#39;/gi, "'")
+            .replace(/&#x27;/gi, "'")
+            .replace(/&lt;/gi, "<")
+            .replace(/&gt;/gi, ">")
+            .replace(/\s+/g, " ")
             .trim();
+    }
 
-          if (candidate.includes("/watch/")) {
-            url = candidate;
-            break;
-          }
+    absoluteUrl(url) {
+        if (!url) return "";
+
+        url = url.trim();
+
+        if (url.startsWith("http://") || url.startsWith("https://")) {
+            return url;
         }
-      }
 
-      // Title
-      if (block.includes('class="movie-title"')) {
-        name = block
-          .substringAfter('class="movie-title"')
-          .substringAfter("<h3>")
-          .substringAfter("<a")
-          .substringAfter(">")
-          .substringBefore("</a>")
-          .trim();
-      }
+        if (url.startsWith("//")) {
+            return "http:" + url;
+        }
 
-      // Fallback title
-      if (!name && block.includes("<h3>")) {
-        name = block
-          .substringAfter("<h3>")
-          .substringAfter(">")
-          .substringBefore("</a>")
-          .trim();
-      }
+        if (url.startsWith("/")) {
+            return this.source.baseUrl + url;
+        }
 
-      name = this.cleanText(name);
-      url = this.absoluteUrl(url);
-      imageUrl = this.absoluteUrl(imageUrl);
-
-      if (!url || !name) continue;
-      if (seen[url]) continue;
-
-      seen[url] = true;
-
-      list.push({
-        "name": name,
-        "url": url,
-        "imageUrl": imageUrl,
-      });
+        return this.source.baseUrl + "/" + url;
     }
 
-    return list;
-  }
+    extractCards(html) {
+        const list = [];
+        const blocks = html
+            .split('class="latest-movie-img-container')
+            .slice(1);
 
-  // ───────────────────────────────────────────────────────────────────────────
-  // Popular
-  // ───────────────────────────────────────────────────────────────────────────
+        const seen = {};
 
-  async getPopular(page) {
-    try {
-      const n = page || 1;
+        for (const block of blocks) {
 
-      let url =
-        this.source.baseUrl +
-        "/movies_details.html?sort=top";
+            let imageUrl = "";
 
-      if (n > 1) {
-        url += "&page=" + n;
-      }
-
-      const html = await this.getPage(
-        url,
-        this.source.baseUrl + "/"
-      );
-
-      if (!html) {
-        return {
-          "list": [],
-          "hasNextPage": false,
-        };
-      }
-
-      const list = this.parseCards(html);
-
-      return {
-        "list": list,
-        "hasNextPage": false,
-      };
-
-    } catch (e) {
-      return {
-        "list": [],
-        "hasNextPage": false,
-      };
-    }
-  }
-
-  // ───────────────────────────────────────────────────────────────────────────
-  // Latest
-  // ───────────────────────────────────────────────────────────────────────────
-
-  async getLatestUpdates(page) {
-    try {
-      const n = page || 1;
-
-      let url =
-        this.source.baseUrl +
-        "/movies_details.html?sort=added";
-
-      if (n > 1) {
-        url += "&page=" + n;
-      }
-
-      const html = await this.getPage(
-        url,
-        this.source.baseUrl + "/"
-      );
-
-      if (!html) {
-        return {
-          "list": [],
-          "hasNextPage": false,
-        };
-      }
-
-      const list = this.parseCards(html);
-
-      return {
-        "list": list,
-        "hasNextPage": false,
-      };
-
-    } catch (e) {
-      return {
-        "list": [],
-        "hasNextPage": false,
-      };
-    }
-  }
-
-  // ───────────────────────────────────────────────────────────────────────────
-  // Search
-  // ───────────────────────────────────────────────────────────────────────────
-
-  async search(query, page, filters) {
-    try {
-      const q = (query || "").trim();
-
-      if (!q) {
-        return {
-          "list": [],
-          "hasNextPage": false,
-        };
-      }
-
-      const n = page || 1;
-
-      let url =
-        this.source.baseUrl +
-        "/search?q=" +
-        encodeURIComponent(q);
-
-      if (n > 1) {
-        url += "&page=" + n;
-      }
-
-      const html = await this.getPage(
-        url,
-        this.source.baseUrl + "/"
-      );
-
-      if (!html) {
-        return {
-          "list": [],
-          "hasNextPage": false,
-        };
-      }
-
-      let list = this.parseCards(html);
-
-      // Optional type filter
-      if (filters && Array.isArray(filters)) {
-
-        for (const filter of filters) {
-
-          if (
-            filter &&
-            filter.type_name === "SelectFilter" &&
-            filter.name === "Type" &&
-            filter.state > 0
-          ) {
-
-            const selected =
-              filter.values[filter.state];
-
-            if (!selected) continue;
-
-            const value = selected.value;
-
-            if (value === "MOVIE" || value === "SERIES") {
-
-              const filtered = [];
-
-              for (const item of list) {
-
-                if (value === "MOVIE") {
-
-                  // A series normally has episode cards.
-                  // We don't remove the result here because search
-                  // itself doesn't expose a completely reliable type field.
-                  filtered.push(item);
-
-                } else if (value === "SERIES") {
-
-                  filtered.push(item);
-                }
-              }
-
-              list = filtered;
+            if (block.includes('data-src="')) {
+                imageUrl = block
+                    .substringAfter('data-src="')
+                    .substringBefore('"')
+                    .trim();
             }
-          }
+
+            let url = "";
+
+            const watchMatch = block.match(
+                /href=["']([^"']*\/watch\/[^"']+)["']/i
+            );
+
+            if (watchMatch) {
+                url = watchMatch[1].trim();
+            }
+
+            let name = "";
+
+            if (block.includes('class="movie-title"')) {
+                name = block
+                    .substringAfter('class="movie-title"')
+                    .substringAfter('<h3>')
+                    .substringAfter('>')
+                    .substringBefore('</a>')
+                    .trim();
+            }
+
+            name = this.cleanText(name);
+            url = this.absoluteUrl(url);
+
+            if (!name || !url) {
+                continue;
+            }
+
+            if (seen[url]) {
+                continue;
+            }
+
+            seen[url] = true;
+
+            list.push({
+                "name": name,
+                "url": url,
+                "imageUrl": imageUrl
+            });
         }
-      }
 
-      return {
-        "list": list,
-        "hasNextPage": false,
-      };
-
-    } catch (e) {
-      return {
-        "list": [],
-        "hasNextPage": false,
-      };
+        return list;
     }
-  }
 
-  // ───────────────────────────────────────────────────────────────────────────
-  // Episode parser
-  // ───────────────────────────────────────────────────────────────────────────
+    extractSection(html, sectionId, nextSectionId) {
+        const startMarker = 'id="' + sectionId + '"';
+        const start = html.indexOf(startMarker);
 
-  parseEpisodes(html) {
-    const chapters = [];
-    const seen = {};
-
-    if (!html) return chapters;
-
-    /*
-      Actual Towkai structure:
-
-      <figure class="figure">
-        <a href="http://mm.towkai.com/watch/spiderman.html?key=xxxx">
-          <div>
-            <img ... data-src="..." alt="Episode title" />
-          </div>
-          <figcaption class="figure-caption " >
-            Episode title
-          </figcaption>
-        </a>
-      </figure>
-    */
-
-    const blocks = html
-      .split('figure class="figure"')
-      .slice(1);
-
-    for (const block of blocks) {
-
-      let episodeUrl = "";
-      let episodeName = "";
-      let episodeImage = "";
-
-      // Find watch URL specifically
-      if (block.includes('href="')) {
-
-        const hrefs = block.split('href="');
-
-        for (let i = 1; i < hrefs.length; i++) {
-
-          const candidate = hrefs[i]
-            .substringBefore('"')
-            .trim();
-
-          if (candidate.includes("/watch/")) {
-            episodeUrl = candidate;
-            break;
-          }
+        if (start === -1) {
+            return "";
         }
-      }
 
-      // Figure caption
-      if (block.includes("<figcaption")) {
-
-        episodeName = block
-          .substringAfter("<figcaption")
-          .substringAfter(">")
-          .substringBefore("</figcaption")
-          .trim();
-      }
-
-      // Remove accidental HTML
-      episodeName = this.cleanText(episodeName);
-
-      // Image alt fallback
-      if (!episodeName && block.includes('alt="')) {
-
-        episodeName = block
-          .substringAfter('alt="')
-          .substringBefore('"')
-          .trim();
-
-        episodeName = this.cleanText(episodeName);
-      }
-
-      // Image
-      if (block.includes('data-src="')) {
-
-        episodeImage = block
-          .substringAfter('data-src="')
-          .substringBefore('"')
-          .trim();
-
-      } else if (block.includes('src="')) {
-
-        episodeImage = block
-          .substringAfter('src="')
-          .substringBefore('"')
-          .trim();
-      }
-
-      episodeUrl = this.absoluteUrl(episodeUrl);
-      episodeImage = this.absoluteUrl(episodeImage);
-
-      if (!episodeUrl) continue;
-      if (seen[episodeUrl]) continue;
-
-      seen[episodeUrl] = true;
-
-      chapters.push({
-        "name": episodeName || "Episode",
-        "url": episodeUrl,
-        "imageUrl": episodeImage,
-        "isFiller": false,
-      });
-    }
-
-    return chapters;
-  }
-
-  // ───────────────────────────────────────────────────────────────────────────
-  // Meta helper
-  // ───────────────────────────────────────────────────────────────────────────
-
-  getMeta(html, metaName) {
-    if (!html) return "";
-
-    const pattern =
-      new RegExp(
-        '<meta[^>]+name=["\']' +
-        metaName +
-        '["\'][^>]+content=["\']([^"\']*)["\']',
-        "i"
-      );
-
-    const match = html.match(pattern);
-
-    if (match) {
-      return this.decodeHtml(match[1]);
-    }
-
-    return "";
-  }
-
-  getProperty(html, propertyName) {
-    if (!html) return "";
-
-    const pattern =
-      new RegExp(
-        '<meta[^>]+property=["\']' +
-        propertyName +
-        '["\'][^>]+content=["\']([^"\']*)["\']',
-        "i"
-      );
-
-    const match = html.match(pattern);
-
-    if (match) {
-      return this.decodeHtml(match[1]);
-    }
-
-    return "";
-  }
-
-  // ───────────────────────────────────────────────────────────────────────────
-  // Detail information
-  // ───────────────────────────────────────────────────────────────────────────
-
-  extractDetailInfo(html, url) {
-
-    let title = "";
-    let description = "";
-    let imageUrl = "";
-    let author = "";
-    let genre = [];
-
-    // ── Title ────────────────────────────────────────────────
-
-    if (html.includes("<title>")) {
-
-      title = html
-        .substringAfter("<title>")
-        .substringBefore("</title>")
-        .trim();
-
-      title = this.cleanText(title);
-    }
-
-    if (!title) {
-      title = this.getProperty(html, "og:title");
-    }
-
-    if (!title) {
-      title = this.getMeta(html, "twitter:title");
-    }
-
-    if (!title && html.includes("<h1")) {
-
-      title = html
-        .substringAfter("<h1")
-        .substringAfter(">")
-        .substringBefore("</h1>")
-        .trim();
-
-      title = this.cleanText(title);
-    }
-
-    // ── Description ─────────────────────────────────────────
-
-    description = this.getMeta(html, "description");
-
-    if (!description) {
-      description = this.getProperty(html, "og:description");
-    }
-
-    if (!description) {
-      description = this.getMeta(html, "twitter:description");
-    }
-
-    // Fallback visible description
-    if (!description && html.includes('<h5 style="color:white;">')) {
-
-      description = html
-        .substringAfter('<h5 style="color:white;">')
-        .substringBefore("</h5>")
-        .trim();
-
-      description = this.cleanText(description);
-    }
-
-    // ── Cover image ─────────────────────────────────────────
-
-    imageUrl = this.getProperty(html, "og:image");
-
-    if (!imageUrl) {
-      imageUrl = this.getMeta(html, "twitter:image");
-    }
-
-    if (!imageUrl && html.includes('class="col-md-3 m-t-10"')) {
-
-      imageUrl = html
-        .substringAfter('class="col-md-3 m-t-10"')
-        .substringAfter('src="')
-        .substringBefore('"')
-        .trim();
-    }
-
-    imageUrl = this.absoluteUrl(imageUrl);
-
-    // ── Author ───────────────────────────────────────────────
-
-    author = this.getMeta(html, "author");
-
-    // ── Genre ────────────────────────────────────────────────
-
-    /*
-      Try common Towkai genre links if present.
-    */
-
-    if (html.includes("/genre/")) {
-
-      const parts = html.split("/genre/");
-
-      for (let i = 1; i < parts.length; i++) {
-
-        let section = parts[i];
-
-        if (!section.includes(">")) continue;
-
-        let g = section
-          .substringAfter(">")
-          .substringBefore("</a>")
-          .trim();
-
-        g = this.cleanText(g);
-
-        if (
-          g &&
-          g.length < 50 &&
-          genre.indexOf(g) === -1
-        ) {
-          genre.push(g);
+        if (!nextSectionId) {
+            return html.substring(start);
         }
-      }
-    }
 
-    return {
-      "name": title || "Unknown",
-      "description": description || "",
-      "imageUrl": imageUrl || "",
-      "author": author || "",
-      "genre": genre,
-      "link": url,
-    };
-  }
+        const endMarker = 'id="' + nextSectionId + '"';
+        const end = html.indexOf(endMarker, start + startMarker.length);
 
-  // ───────────────────────────────────────────────────────────────────────────
-  // Detail
-  // ───────────────────────────────────────────────────────────────────────────
-
-  async getDetail(url) {
-
-    if (!url) {
-      throw new Error("Towkai detail URL is empty");
-    }
-
-    const html = await this.getPage(
-      url,
-      this.source.baseUrl + "/"
-    );
-
-    if (!html) {
-      throw new Error("Unable to load Towkai detail page");
-    }
-
-    const info = this.extractDetailInfo(
-      html,
-      url
-    );
-
-    const chapters = this.parseEpisodes(html);
-
-    /*
-      A movie page doesn't have the episode carousel.
-
-      Therefore expose the page itself as a single
-      playable chapter.
-    */
-
-    if (chapters.length === 0) {
-
-      chapters.push({
-        "name": "Movie",
-        "url": url,
-        "isFiller": false,
-      });
-
-    } else {
-
-      // Newest episode first
-      chapters.reverse();
-    }
-
-    return {
-      "name": info.name,
-      "description": info.description,
-      "author": info.author,
-      "genre": info.genre,
-      "status": 1,
-      "imageUrl": info.imageUrl,
-      "link": info.link,
-      "chapters": chapters,
-    };
-  }
-
-  // ───────────────────────────────────────────────────────────────────────────
-  // Extract Video.js source
-  // ───────────────────────────────────────────────────────────────────────────
-
-  extractVideoSource(html) {
-
-    if (!html) return "";
-
-    let videoUrl = "";
-
-    /*
-      Actual Towkai player:
-
-      sources: [{
-          src: 'http://.../index.m3u8',
-          type: 'application/x-mpegURL'
-      }]
-    */
-
-    // Primary exact parser
-    if (html.includes("sources: [{")) {
-
-      const section = html
-        .substringAfter("sources: [{");
-
-      if (section.includes("src:")) {
-
-        const srcPart = section
-          .substringAfter("src:")
-          .trim();
-
-        if (srcPart.startsWith("'")) {
-
-          videoUrl = srcPart
-            .substringAfter("'")
-            .substringBefore("'")
-            .trim();
-
-        } else if (srcPart.startsWith("\"")) {
-
-          videoUrl = srcPart
-            .substringAfter("\"")
-            .substringBefore("\"")
-            .trim();
+        if (end === -1) {
+            return html.substring(start);
         }
-      }
+
+        return html.substring(start, end);
     }
 
-    // Direct single-quote fallback
-    if (!videoUrl && html.includes("src: '")) {
+    // -----------------------------
+    // Home / Popular
+    // -----------------------------
 
-      const parts = html.split("src: '");
+    async getPopular(page) {
+        const client = new Client();
 
-      for (let i = 1; i < parts.length; i++) {
+        const res = await client.get(this.source.baseUrl + "/");
+        const html = res.body;
 
-        const candidate = parts[i]
-          .substringBefore("'")
-          .trim();
-
-        if (
-          candidate.includes(".m3u8") ||
-          candidate.includes(".mp4")
-        ) {
-          videoUrl = candidate;
-          break;
-        }
-      }
-    }
-
-    // Double quote fallback
-    if (!videoUrl && html.includes('src: "')) {
-
-      const parts = html.split('src: "');
-
-      for (let i = 1; i < parts.length; i++) {
-
-        const candidate = parts[i]
-          .substringBefore('"')
-          .trim();
-
-        if (
-          candidate.includes(".m3u8") ||
-          candidate.includes(".mp4")
-        ) {
-          videoUrl = candidate;
-          break;
-        }
-      }
-    }
-
-    // HTML video source fallback
-    if (!videoUrl && html.includes("<source")) {
-
-      const sourceBlocks =
-        html.split("<source").slice(1);
-
-      for (const block of sourceBlocks) {
-
-        if (!block.includes('src="')) continue;
-
-        const candidate = block
-          .substringAfter('src="')
-          .substringBefore('"')
-          .trim();
-
-        if (
-          candidate.includes(".m3u8") ||
-          candidate.includes(".mp4")
-        ) {
-          videoUrl = candidate;
-          break;
-        }
-      }
-    }
-
-    // Regex fallback for m3u8
-    if (!videoUrl) {
-
-      const match = html.match(
-        /https?:\/\/[^'"<>\s]+\.m3u8(?:[^'"<>\s]*)?/i
-      );
-
-      if (match) {
-        videoUrl = match[0];
-      }
-    }
-
-    return this.absoluteUrl(videoUrl);
-  }
-
-  // ───────────────────────────────────────────────────────────────────────────
-  // Resolve HLS master playlist
-  // ───────────────────────────────────────────────────────────────────────────
-
-  async resolveMasterPlaylist(masterUrl, headers) {
-
-    try {
-
-      const client = new Client();
-
-      const res = await client.get(
-        masterUrl,
-        headers || {}
-      );
-
-      if (!res || !res.body) {
-        return [];
-      }
-
-      const body = res.body;
-
-      if (!body.includes("#EXT-X-STREAM-INF")) {
-        return [];
-      }
-
-      const lines =
-        body.split("\n");
-
-      const variants = [];
-
-      const base =
-        masterUrl.substring(
-          0,
-          masterUrl.lastIndexOf("/") + 1
+        // Towkai home has a Top Weekly movie section.
+        let section = this.extractSection(
+            html,
+            "top-weekly",
+            "top-rating"
         );
 
-      for (let i = 0; i < lines.length; i++) {
-
-        const line =
-          lines[i].trim();
-
-        if (
-          !line.startsWith(
-            "#EXT-X-STREAM-INF"
-          )
-        ) {
-          continue;
+        // Fallback if the section marker changes.
+        if (!section) {
+            section = html;
         }
 
-        let quality = "Auto";
+        const list = this.extractCards(section);
 
-        const resolution =
-          line.match(
-            /RESOLUTION=\d+x(\d+)/i
-          );
+        return {
+            "list": list,
+            "hasNextPage": false
+        };
+    }
 
-        if (resolution) {
-          quality =
-            resolution[1] + "p";
-        }
+    // -----------------------------
+    // Search
+    // -----------------------------
 
-        for (
-          let j = i + 1;
-          j < lines.length;
-          j++
-        ) {
+    async search(query, page, filters) {
+        const client = new Client();
 
-          let stream =
-            lines[j].trim();
+        const searchUrl =
+            this.source.baseUrl +
+            "/search?q=" +
+            encodeURIComponent(query);
 
-          if (!stream) continue;
+        const res = await client.get(searchUrl);
+        const html = res.body;
 
-          if (stream.startsWith("#")) {
-            continue;
-          }
+        const list = this.extractCards(html);
 
-          if (
-            stream.startsWith("http://") ||
-            stream.startsWith("https://")
-          ) {
-            variants.push({
-              "url": stream,
-              "quality": quality,
-            });
-          } else if (stream.startsWith("/")) {
-            variants.push({
-              "url":
-                this.source.baseUrl +
-                stream,
-              "quality": quality,
-            });
-          } else {
-            variants.push({
-              "url":
-                base +
-                stream,
-              "quality": quality,
-            });
-          }
+        return {
+            "list": list,
+            "hasNextPage": false
+        };
+    }
 
-          break;
-        }
-      }
+    // -----------------------------
+    // Detail / Episodes
+    // -----------------------------
 
-      variants.sort(function(a, b) {
+    async getDetail(url) {
+        const client = new Client();
 
-        return (
-          (parseInt(b.quality) || 0) -
-          (parseInt(a.quality) || 0)
+        const res = await client.get(url);
+        const html = res.body;
+
+        // Title
+        let title = "";
+
+        const titleMatch = html.match(
+            /<h1[^>]*>\s*([\s\S]*?)\s*<\/h1>/i
         );
 
-      });
-
-      return variants;
-
-    } catch (e) {
-
-      return [];
-    }
-  }
-
-  // ───────────────────────────────────────────────────────────────────────────
-  // Video list
-  // ───────────────────────────────────────────────────────────────────────────
-
-  async getVideoList(url) {
-
-    if (!url || url === "n/a") {
-      return [];
-    }
-
-    try {
-
-      /*
-        IMPORTANT:
-
-        The episode URL itself is the Towkai watch page:
-
-        /watch/spiderman.html?key=xxxxxxxx
-
-        We load that exact page and extract its
-        Video.js source.
-      */
-
-      const html = await this.getPage(
-        url,
-        this.source.baseUrl + "/"
-      );
-
-      if (!html) {
-        return [];
-      }
-
-      const videoUrl =
-        this.extractVideoSource(html);
-
-      if (!videoUrl) {
-        return [];
-      }
-
-      /*
-        Towkai normally returns:
-
-        http://100.64.64.11:80/.../index.m3u8
-
-        or:
-
-        http://ms.towkai.com:80/.../index.m3u8
-      */
-
-      const streams = [];
-
-      const headers = {
-        "User-Agent": this.ua,
-        "Referer": url,
-      };
-
-      /*
-        Try master playlist first.
-
-        If it contains multiple qualities, expose them
-        separately.
-      */
-
-      if (
-        videoUrl.includes(".m3u8")
-      ) {
-
-        const variants =
-          await this.resolveMasterPlaylist(
-            videoUrl,
-            headers
-          );
-
-        if (variants.length > 0) {
-
-          for (const variant of variants) {
-
-            streams.push({
-              "url": variant.url,
-              "originalUrl": videoUrl,
-              "quality":
-                variant.quality +
-                " [Towkai]",
-              "headers": headers,
-              "subtitles": [],
-            });
-          }
-
-          return streams;
+        if (titleMatch) {
+            title = this.cleanText(titleMatch[1]);
         }
-      }
 
-      // Normal single HLS stream
-      streams.push({
-        "url": videoUrl,
-        "originalUrl": videoUrl,
-        "quality":
-          videoUrl.includes(".m3u8")
-            ? "HLS [Towkai]"
-            : "Auto",
-        "headers": headers,
-        "subtitles": [],
-      });
+        if (!title) {
+            const ogTitle = html.match(
+                /<meta\s+property=["']og:title["']\s+content=["']([^"']*)["']/i
+            );
 
-      return streams;
+            if (ogTitle) {
+                title = this.cleanText(ogTitle[1]);
+            }
+        }
 
-    } catch (e) {
+        // Description
+        let description = "";
 
-      return [];
+        // First try meta description.
+        const metaDesc = html.match(
+            /<meta\s+name=["']description["']\s+content=["']([\s\S]*?)["']\s*\/?>/i
+        );
+
+        if (metaDesc) {
+            description = this.cleanText(metaDesc[1]);
+        }
+
+        // Fallback to visible description.
+        if (!description) {
+            const h5Match = html.match(
+                /<h5[^>]*>\s*<p[^>]*>\s*([\s\S]*?)\s*<\/p>\s*<\/h5>/i
+            );
+
+            if (h5Match) {
+                description = this.cleanText(h5Match[1]);
+            }
+        }
+
+        // Fallback to OpenGraph description.
+        if (!description) {
+            const ogDesc = html.match(
+                /<meta\s+property=["']og:description["']\s+content=["']([\s\S]*?)["']\s*\/?>/i
+            );
+
+            if (ogDesc) {
+                description = this.cleanText(ogDesc[1]);
+            }
+        }
+
+        // Cover
+        let coverImg = "";
+
+        const ogImage = html.match(
+            /<meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/i
+        );
+
+        if (ogImage) {
+            coverImg = ogImage[1].trim();
+        }
+
+        if (!coverImg) {
+            const coverMatch = html.match(
+                /class=["']col-md-3 m-t-10["'][\s\S]*?<img[^>]*src=["']([^"']+)["']/i
+            );
+
+            if (coverMatch) {
+                coverImg = coverMatch[1].trim();
+            }
+        }
+
+        if (!coverImg) {
+            const thumbMatch = html.match(
+                /<meta\s+name=["']twitter:image["']\s+content=["']([^"']+)["']/i
+            );
+
+            if (thumbMatch) {
+                coverImg = thumbMatch[1].trim();
+            }
+        }
+
+        // Episodes
+        const chapters = [];
+
+        const figureBlocks = html
+            .split('<figure class="figure"')
+            .slice(1);
+
+        for (const block of figureBlocks) {
+
+            let epUrl = "";
+
+            const epUrlMatch = block.match(
+                /<a\s+href=["']([^"']+)["']/i
+            );
+
+            if (epUrlMatch) {
+                epUrl = this.absoluteUrl(epUrlMatch[1]);
+            }
+
+            let epName = "";
+
+            const epNameMatch = block.match(
+                /<figcaption[^>]*>\s*([\s\S]*?)\s*<\/figcaption>/i
+            );
+
+            if (epNameMatch) {
+                epName = this.cleanText(epNameMatch[1]);
+            }
+
+            if (epUrl && epName) {
+                chapters.push({
+                    "name": epName,
+                    "url": epUrl
+                });
+            }
+        }
+
+        // Movie: no <figure>, so create one playable chapter.
+        if (chapters.length === 0) {
+            chapters.push({
+                "name": title || "Movie",
+                "url": url
+            });
+        }
+
+        return {
+            "name": title,
+            "description": description,
+            "imageUrl": coverImg,
+            "status": 1,
+            "chapters": chapters
+        };
     }
-  }
 
-  // ───────────────────────────────────────────────────────────────────────────
-  // Headers
-  // ───────────────────────────────────────────────────────────────────────────
+    // -----------------------------
+    // Video URL
+    // -----------------------------
 
-  getHeaders() {
-    return {};
-  }
+    async getVideoList(url) {
+        const client = new Client();
 
-  // ───────────────────────────────────────────────────────────────────────────
-  // Latest support
-  // ───────────────────────────────────────────────────────────────────────────
+        const res = await client.get(url);
+        const html = res.body;
 
-  get supportsLatest() {
-    return true;
-  }
+        const videos = [];
+        const seen = {};
 
-  // ───────────────────────────────────────────────────────────────────────────
-  // Optional methods
-  // ───────────────────────────────────────────────────────────────────────────
+        // Normal Towkai player format:
+        // sources: [{
+        //     src: 'VIDEO_URL',
+        //     type: 'application/x-mpegURL'
+        // }]
+        const sourceRegex =
+            /sources\s*:\s*\[\s*\{\s*src\s*:\s*['"]([^'"]+)['"]/gi;
 
-  async getPageList(url) {
-    return [];
-  }
+        let match;
 
-  async getHtmlContent(url) {
-    return "";
-  }
+        while ((match = sourceRegex.exec(html)) !== null) {
+            const videoUrl = match[1].trim();
 
-  async cleanHtmlContent(html) {
-    return html;
-  }
+            if (!videoUrl || seen[videoUrl]) {
+                continue;
+            }
 
-  // ───────────────────────────────────────────────────────────────────────────
-  // Filters
-  // ───────────────────────────────────────────────────────────────────────────
+            seen[videoUrl] = true;
 
-  getFilterList() {
-    return [];
-  }
+            videos.push({
+                "url": videoUrl,
+                "originalUrl": videoUrl,
+                "quality": "Auto"
+            });
+        }
 
-  // ───────────────────────────────────────────────────────────────────────────
-  // Preferences
-  // ───────────────────────────────────────────────────────────────────────────
+        // Fallback: find any m3u8 URL directly in the page.
+        if (videos.length === 0) {
+            const m3u8Regex =
+                /['"]([^'"]+\.m3u8(?:\?[^'"]*)?)['"]/gi;
 
-  getSourcePreferences() {
-    return [];
-  }
+            while ((match = m3u8Regex.exec(html)) !== null) {
+                const videoUrl = match[1].trim();
+
+                if (!videoUrl || seen[videoUrl]) {
+                    continue;
+                }
+
+                seen[videoUrl] = true;
+
+                videos.push({
+                    "url": videoUrl,
+                    "originalUrl": videoUrl,
+                    "quality": "Auto"
+                });
+            }
+        }
+
+        return videos;
+    }
+
+    // -----------------------------
+    // Latest
+    // -----------------------------
+
+    get supportsLatest() {
+        return true;
+    }
+
+    async getLatestUpdates(page) {
+        const client = new Client();
+
+        const res = await client.get(this.source.baseUrl + "/");
+        const html = res.body;
+
+        let section = this.extractSection(
+            html,
+            "recently-added",
+            "recently-released"
+        );
+
+        if (!section) {
+            section = html;
+        }
+
+        const list = this.extractCards(section);
+
+        return {
+            "list": list,
+            "hasNextPage": false
+        };
+    }
+
+    // -----------------------------
+    // Other required methods
+    // -----------------------------
+
+    getHeaders() {
+        return {};
+    }
+
+    async getHtmlContent(url) {
+        return "";
+    }
+
+    async cleanHtmlContent(html) {
+        return html;
+    }
+
+    async getPageList(url) {
+        return [];
+    }
+
+    getFilterList() {
+        return [];
+    }
+
+    getSourcePreferences() {
+        return [];
+    }
 }
