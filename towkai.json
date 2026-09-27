@@ -1,0 +1,24 @@
+[
+    {
+        "name": "Towkai",
+        "id": 918273645,
+        "baseUrl": "http://mm.towkai.com",
+        "lang": "en",
+        "typeSource": "single",
+        "iconUrl": "http://mm.towkai.com/uploads/system_logo/logo_629599c462f85.png",
+        "dateFormat": "",
+        "dateFormatLocale": "",
+        "isNsfw": false,
+        "hasCloudflare": false,
+        "sourceCodeUrl": "https://raw.githubusercontent.com/nordacctrail-dev/Newdrp/refs/heads/main/towkai.js",
+        "apiUrl": "",
+        "version": "0.0.7",
+        "isManga": false,
+        "itemType": 1,
+        "isFullData": false,
+        "appMinVerReq": "0.5.0",
+        "additionalParams": "",
+        "sourceCodeLanguage": 1,
+        "notes": ""
+    }
+]
